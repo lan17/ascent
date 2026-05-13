@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { EffectComposer, Bloom, Vignette, ChromaticAberration } from "@react-three/postprocessing";
+import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh } from "./LevelMesh";
 import { clampToLevel, generateLevel, key, CELL, type Level } from "./level";
@@ -122,53 +124,113 @@ function ShipController({ refs }: { refs: SharedRefs }) {
 }
 
 function LaserMesh({ laser }: { laser: Laser }) {
-  const ref = useRef<THREE.Mesh>(null);
+  const ref = useRef<THREE.Group>(null);
   useFrame(() => {
     if (ref.current) {
       ref.current.position.copy(laser.pos);
       ref.current.lookAt(laser.pos.clone().add(laser.vel));
+      ref.current.rotateX(Math.PI / 2);
     }
   });
-  const color = laser.hostile ? "#33ff66" : "#ff3344";
+  const color = laser.hostile ? "#33ff88" : "#ff3a55";
+  const glow = laser.hostile ? "#88ffaa" : "#ffaaaa";
   return (
-    <mesh ref={ref}>
-      <cylinderGeometry args={[0.12, 0.12, 1.6, 6]} />
-      <meshBasicMaterial color={color} />
-    </mesh>
+    <group ref={ref}>
+      {/* Bright inner core */}
+      <mesh>
+        <cylinderGeometry args={[0.08, 0.08, 1.8, 6]} />
+        <meshBasicMaterial color={glow} toneMapped={false} />
+      </mesh>
+      {/* Outer additive halo */}
+      <mesh>
+        <cylinderGeometry args={[0.28, 0.28, 1.8, 6]} />
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={0.55}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </mesh>
+      <pointLight color={color} intensity={1.4} distance={6} decay={2} />
+    </group>
   );
 }
 
 function RobotMesh({ robot }: { robot: Robot }) {
   const ref = useRef<THREE.Group>(null);
-  useFrame(() => {
+  const ringRef = useRef<THREE.Mesh>(null);
+  const eyeRef = useRef<THREE.Mesh>(null);
+  useFrame((state) => {
+    const t = state.clock.elapsedTime + robot.bobPhase;
     if (ref.current) {
       ref.current.position.copy(robot.pos);
-      ref.current.rotation.y += 0.01;
+      ref.current.rotation.y = t * 0.6;
+    }
+    if (ringRef.current) {
+      ringRef.current.rotation.x = t * 1.4;
+      ringRef.current.rotation.z = t * 0.9;
+    }
+    if (eyeRef.current) {
+      const m = eyeRef.current.material as THREE.MeshBasicMaterial;
+      const pulse = 0.7 + Math.sin(t * 6) * 0.3;
+      (m.color as THREE.Color).setRGB(0.2 * pulse, 1.0 * pulse, 0.45 * pulse);
     }
   });
   if (!robot.alive) return null;
   return (
     <group ref={ref}>
+      {/* Hull — faceted body */}
       <mesh>
         <octahedronGeometry args={[1.4, 0]} />
         <meshStandardMaterial
-          color="#9aa4b2"
-          emissive="#1a2030"
-          emissiveIntensity={0.6}
-          metalness={0.7}
-          roughness={0.4}
+          color="#7a8392"
+          emissive="#0a1018"
+          emissiveIntensity={0.4}
+          metalness={0.85}
+          roughness={0.35}
           flatShading
         />
       </mesh>
-      <mesh position={[0, 0, 0]}>
-        <sphereGeometry args={[0.45, 12, 12]} />
+      {/* Belt of armor plates */}
+      <mesh rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[1.05, 0.18, 8, 16]} />
         <meshStandardMaterial
-          color="#33ff66"
-          emissive="#33ff66"
-          emissiveIntensity={2.0}
+          color="#3a3540"
+          metalness={0.95}
+          roughness={0.25}
+          flatShading
         />
       </mesh>
-      <pointLight color="#33ff66" intensity={0.6} distance={6} decay={2} />
+      {/* Spinning targeting ring */}
+      <mesh ref={ringRef}>
+        <torusGeometry args={[1.7, 0.05, 6, 32]} />
+        <meshStandardMaterial
+          color="#33ff88"
+          emissive="#33ff88"
+          emissiveIntensity={2.2}
+          toneMapped={false}
+        />
+      </mesh>
+      {/* Glowing eye */}
+      <mesh ref={eyeRef} position={[0, 0, 0]}>
+        <sphereGeometry args={[0.5, 16, 16]} />
+        <meshBasicMaterial color="#33ff88" toneMapped={false} />
+      </mesh>
+      {/* Halo glow */}
+      <mesh>
+        <sphereGeometry args={[0.85, 12, 12]} />
+        <meshBasicMaterial
+          color="#33ff88"
+          transparent
+          opacity={0.18}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </mesh>
+      <pointLight color="#33ff88" intensity={1.2} distance={9} decay={2} />
     </group>
   );
 }
@@ -330,6 +392,42 @@ function ShipBody({ refs }: { refs: SharedRefs }) {
   );
 }
 
+function DustField() {
+  const ref = useRef<THREE.Points>(null);
+  const geo = useMemo(() => {
+    const N = 600;
+    const positions = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      positions[i * 3 + 0] = (Math.random() - 0.5) * 200;
+      positions[i * 3 + 1] = (Math.random() - 0.5) * 80;
+      positions[i * 3 + 2] = (Math.random() - 0.5) * 200;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    return g;
+  }, []);
+  const { camera } = useThree();
+  useFrame(() => {
+    if (ref.current) {
+      // keep dust field roughly around the camera
+      ref.current.position.copy(camera.position);
+    }
+  });
+  return (
+    <points ref={ref} geometry={geo}>
+      <pointsMaterial
+        color="#ffaa66"
+        size={0.08}
+        sizeAttenuation
+        transparent
+        opacity={0.55}
+        depthWrite={false}
+        toneMapped={false}
+      />
+    </points>
+  );
+}
+
 function hasWebGL(): boolean {
   try {
     const c = document.createElement("canvas");
@@ -470,20 +568,39 @@ function GameInner() {
     <div className="absolute inset-0">
       <Canvas
         camera={{ fov: 78, near: 0.1, far: 600, position: [0, 0, 0] }}
-        gl={{ antialias: true }}
+        gl={{ antialias: true, powerPreference: "high-performance" }}
         onCreated={({ gl, scene }) => {
-          gl.setClearColor(new THREE.Color("#020203"));
-          scene.fog = new THREE.FogExp2(0x050306, 0.025);
+          gl.setClearColor(new THREE.Color("#02010a"));
+          gl.toneMapping = THREE.ACESFilmicToneMapping;
+          gl.toneMappingExposure = 1.05;
+          scene.fog = new THREE.FogExp2(0x06050a, 0.022);
         }}
       >
-        <ambientLight intensity={0.18} color="#5a4030" />
-        <hemisphereLight args={["#7a4a30", "#101018", 0.25]} />
+        <ambientLight intensity={0.12} color="#3a2a40" />
+        <hemisphereLight args={["#7a4a30", "#10141c", 0.22]} />
         <LevelMesh level={level} />
+        <DustField />
         <ShipController refs={refs} />
         <ShipBody refs={refs} />
         <GameLoop refs={refs} version={hudState.status === "playing" ? 1 : 0} />
         {/* Headlight */}
         <Headlight refs={refs} />
+        <EffectComposer multisampling={0}>
+          <Bloom
+            intensity={1.4}
+            luminanceThreshold={0.25}
+            luminanceSmoothing={0.6}
+            mipmapBlur
+            radius={0.85}
+          />
+          <ChromaticAberration
+            offset={new THREE.Vector2(0.0008, 0.0012)}
+            blendFunction={BlendFunction.NORMAL}
+            radialModulation={false}
+            modulationOffset={0}
+          />
+          <Vignette eskil={false} offset={0.2} darkness={0.85} />
+        </EffectComposer>
       </Canvas>
       <Hud
         state={hudState}
