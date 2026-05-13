@@ -330,7 +330,36 @@ function ShipBody({ refs }: { refs: SharedRefs }) {
   );
 }
 
+function hasWebGL(): boolean {
+  try {
+    const c = document.createElement("canvas");
+    return !!(c.getContext("webgl2") || c.getContext("webgl"));
+  } catch {
+    return false;
+  }
+}
+
 export function Game() {
+  const [webglOk] = useState(() => hasWebGL());
+  if (!webglOk) {
+    return (
+      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black p-8 text-center text-orange-200">
+        <h1 className="mb-4 text-3xl font-black tracking-[0.3em] text-orange-400">
+          DEEP MINE
+        </h1>
+        <p className="mb-2 max-w-md text-sm text-orange-200/80">
+          This 3D game needs WebGL, which is disabled in this embedded view.
+        </p>
+        <p className="max-w-md text-sm text-orange-200/80">
+          Open the preview in a new browser tab to play.
+        </p>
+      </div>
+    );
+  }
+  return <GameInner />;
+}
+
+function GameInner() {
   const [hudState, setHudState] = useState<GameState>(initialState);
   const hudRef = useRef<GameState>(hudState);
   hudRef.current = hudState;
