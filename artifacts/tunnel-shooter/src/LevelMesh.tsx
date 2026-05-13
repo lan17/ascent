@@ -9,7 +9,7 @@ type Junction = { pos: THREE.Vector3; color: THREE.Color; intensity: number };
 
 // Procedural metal-panel wall texture (diffuse + normal). Runs once per page.
 function makeWallTextures(): { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture } {
-  const SIZE = 256;
+  const SIZE = 512;
   const mk = () => {
     const c = document.createElement("canvas");
     c.width = SIZE; c.height = SIZE;
@@ -135,7 +135,10 @@ function makeWallTextures(): { map: THREE.Texture; normalMap: THREE.Texture; rou
     const t = new THREE.CanvasTexture(cv);
     t.wrapS = THREE.RepeatWrapping;
     t.wrapT = THREE.RepeatWrapping;
-    t.anisotropy = 8;
+    t.anisotropy = 16;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.generateMipmaps = true;
     if (srgb) t.colorSpace = THREE.SRGBColorSpace;
     return t;
   };
@@ -193,7 +196,7 @@ export function LevelMesh({ level }: Props) {
         normals.push(n.x, n.y, n.z);
         colors.push(col.r, col.g, col.b);
       }
-      uvs.push(0, 0, 4, 0, 4, 4, 0, 4);
+      uvs.push(0, 0, 2, 0, 2, 2, 0, 2);
       indices.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
       edgePositions.push(
         a.x, a.y, a.z, b.x, b.y, b.z,

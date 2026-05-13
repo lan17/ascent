@@ -587,11 +587,11 @@ function GameInner() {
         <Headlight refs={refs} />
         <EffectComposer multisampling={0}>
           <Bloom
-            intensity={1.4}
-            luminanceThreshold={0.25}
-            luminanceSmoothing={0.6}
+            intensity={0.9}
+            luminanceThreshold={0.7}
+            luminanceSmoothing={0.4}
             mipmapBlur
-            radius={0.85}
+            radius={0.7}
           />
           <ChromaticAberration
             offset={new THREE.Vector2(0.0008, 0.0012)}
