@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Tunnel Shooter"
+version = "1.0.0"
+id = "artifacts/tunnel-shooter"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20175
+
+[services.development]
+run = "pnpm --filter @workspace/tunnel-shooter run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/tunnel-shooter", "run", "build" ]
+publicDir = "artifacts/tunnel-shooter/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20175"
+BASE_PATH = "/"
