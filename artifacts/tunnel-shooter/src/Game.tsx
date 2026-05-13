@@ -570,14 +570,14 @@ function GameInner() {
         camera={{ fov: 78, near: 0.1, far: 600, position: [0, 0, 0] }}
         gl={{ antialias: true, powerPreference: "high-performance" }}
         onCreated={({ gl, scene }) => {
-          gl.setClearColor(new THREE.Color("#02010a"));
+          gl.setClearColor(new THREE.Color("#04030a"));
           gl.toneMapping = THREE.ACESFilmicToneMapping;
-          gl.toneMappingExposure = 1.05;
-          scene.fog = new THREE.FogExp2(0x06050a, 0.022);
+          gl.toneMappingExposure = 1.25;
+          scene.fog = new THREE.FogExp2(0x0a0810, 0.012);
         }}
       >
-        <ambientLight intensity={0.12} color="#3a2a40" />
-        <hemisphereLight args={["#7a4a30", "#10141c", 0.22]} />
+        <ambientLight intensity={0.45} color="#5a4a55" />
+        <hemisphereLight args={["#a06840", "#1a1820", 0.6]} />
         <LevelMesh level={level} />
         <DustField />
         <ShipController refs={refs} />
@@ -628,12 +628,12 @@ function Headlight({ refs }: { refs: SharedRefs }) {
   return (
     <spotLight
       ref={ref}
-      color="#ffd9a8"
-      intensity={45}
-      distance={45}
-      angle={0.9}
-      penumbra={0.6}
-      decay={1.6}
+      color="#ffe0b8"
+      intensity={90}
+      distance={80}
+      angle={1.1}
+      penumbra={0.55}
+      decay={1.3}
     />
   );
 }

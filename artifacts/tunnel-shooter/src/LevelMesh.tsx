@@ -7,7 +7,153 @@ type Props = { level: Level };
 
 type Junction = { pos: THREE.Vector3; color: THREE.Color; intensity: number };
 
+// Procedural metal-panel wall texture (diffuse + normal). Runs once per page.
+function makeWallTextures(): { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture } {
+  const SIZE = 256;
+  const mk = () => {
+    const c = document.createElement("canvas");
+    c.width = SIZE; c.height = SIZE;
+    return c;
+  };
+
+  // ---- DIFFUSE ----
+  const diff = mk();
+  const dctx = diff.getContext("2d")!;
+  // Base
+  const grad = dctx.createLinearGradient(0, 0, SIZE, SIZE);
+  grad.addColorStop(0, "#6b4226");
+  grad.addColorStop(1, "#3a2010");
+  dctx.fillStyle = grad;
+  dctx.fillRect(0, 0, SIZE, SIZE);
+  // Noise
+  const img = dctx.getImageData(0, 0, SIZE, SIZE);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const n = (Math.random() - 0.5) * 40;
+    img.data[i] = Math.max(0, Math.min(255, img.data[i]! + n));
+    img.data[i + 1] = Math.max(0, Math.min(255, img.data[i + 1]! + n * 0.8));
+    img.data[i + 2] = Math.max(0, Math.min(255, img.data[i + 2]! + n * 0.6));
+  }
+  dctx.putImageData(img, 0, 0);
+  // Panel divisions (cross + sub panels)
+  dctx.strokeStyle = "rgba(8,4,2,0.85)";
+  dctx.lineWidth = 4;
+  dctx.strokeRect(2, 2, SIZE - 4, SIZE - 4);
+  dctx.beginPath();
+  dctx.moveTo(SIZE / 2, 0); dctx.lineTo(SIZE / 2, SIZE);
+  dctx.moveTo(0, SIZE / 2); dctx.lineTo(SIZE, SIZE / 2);
+  dctx.stroke();
+  // Highlight edges (bevel)
+  dctx.strokeStyle = "rgba(255,170,100,0.35)";
+  dctx.lineWidth = 1.5;
+  dctx.strokeRect(6, 6, SIZE - 12, SIZE - 12);
+  dctx.beginPath();
+  dctx.moveTo(SIZE / 2 + 2, 4); dctx.lineTo(SIZE / 2 + 2, SIZE - 4);
+  dctx.moveTo(4, SIZE / 2 + 2); dctx.lineTo(SIZE - 4, SIZE / 2 + 2);
+  dctx.stroke();
+  // Rivets at panel corners + quadrant centers
+  const rivets: Array<[number, number]> = [
+    [16, 16], [SIZE - 16, 16], [16, SIZE - 16], [SIZE - 16, SIZE - 16],
+    [SIZE / 2, 16], [SIZE / 2, SIZE - 16], [16, SIZE / 2], [SIZE - 16, SIZE / 2],
+    [SIZE / 4, SIZE / 4], [(3 * SIZE) / 4, SIZE / 4],
+    [SIZE / 4, (3 * SIZE) / 4], [(3 * SIZE) / 4, (3 * SIZE) / 4],
+  ];
+  for (const [x, y] of rivets) {
+    const rg = dctx.createRadialGradient(x - 1, y - 1, 0, x, y, 5);
+    rg.addColorStop(0, "#ffd09a");
+    rg.addColorStop(0.6, "#7a4a26");
+    rg.addColorStop(1, "rgba(0,0,0,0.6)");
+    dctx.fillStyle = rg;
+    dctx.beginPath();
+    dctx.arc(x, y, 5, 0, Math.PI * 2);
+    dctx.fill();
+  }
+  // Hazard stripe along one panel edge (orange/black)
+  const stripeW = 14;
+  dctx.save();
+  dctx.translate(SIZE / 2 - stripeW / 2, 0);
+  for (let y = 0; y < SIZE; y += 12) {
+    dctx.fillStyle = (y / 12) % 2 === 0 ? "#ffb04a" : "#1a0e06";
+    dctx.fillRect(0, y, stripeW, 12);
+  }
+  dctx.restore();
+
+  // ---- NORMAL MAP (fake — from grayscale of diffuse using sobel) ----
+  const norm = mk();
+  const nctx = norm.getContext("2d")!;
+  // Start with mid normal (128,128,255)
+  nctx.fillStyle = "rgb(128,128,255)";
+  nctx.fillRect(0, 0, SIZE, SIZE);
+  // Draw panel grooves as darker indentations into normals: encode by drawing offset highlights/shadows.
+  // Bevel along panel cross
+  nctx.lineWidth = 2;
+  nctx.strokeStyle = "rgb(80,128,255)"; // -X
+  nctx.beginPath();
+  nctx.moveTo(SIZE / 2 - 1, 0); nctx.lineTo(SIZE / 2 - 1, SIZE);
+  nctx.stroke();
+  nctx.strokeStyle = "rgb(176,128,255)"; // +X
+  nctx.beginPath();
+  nctx.moveTo(SIZE / 2 + 1, 0); nctx.lineTo(SIZE / 2 + 1, SIZE);
+  nctx.stroke();
+  nctx.strokeStyle = "rgb(128,80,255)"; // -Y
+  nctx.beginPath();
+  nctx.moveTo(0, SIZE / 2 - 1); nctx.lineTo(SIZE, SIZE / 2 - 1);
+  nctx.stroke();
+  nctx.strokeStyle = "rgb(128,176,255)"; // +Y
+  nctx.beginPath();
+  nctx.moveTo(0, SIZE / 2 + 1); nctx.lineTo(SIZE, SIZE / 2 + 1);
+  nctx.stroke();
+  // Outer frame bevel
+  nctx.lineWidth = 3;
+  nctx.strokeStyle = "rgb(160,160,255)";
+  nctx.strokeRect(4, 4, SIZE - 8, SIZE - 8);
+  // Rivet bumps
+  for (const [x, y] of rivets) {
+    const rg = nctx.createRadialGradient(x - 1.5, y - 1.5, 0, x, y, 5);
+    rg.addColorStop(0, "rgb(190,190,255)");
+    rg.addColorStop(1, "rgb(128,128,255)");
+    nctx.fillStyle = rg;
+    nctx.beginPath();
+    nctx.arc(x, y, 5, 0, Math.PI * 2);
+    nctx.fill();
+  }
+
+  // ---- ROUGHNESS (panels rougher, rivets/hazard shinier) ----
+  const rough = mk();
+  const rctx = rough.getContext("2d")!;
+  rctx.fillStyle = "rgb(200,200,200)"; // rough by default
+  rctx.fillRect(0, 0, SIZE, SIZE);
+  rctx.fillStyle = "rgb(80,80,80)";
+  rctx.fillRect(SIZE / 2 - stripeW / 2, 0, stripeW, SIZE);
+  for (const [x, y] of rivets) {
+    rctx.fillStyle = "rgb(60,60,60)";
+    rctx.beginPath();
+    rctx.arc(x, y, 4, 0, Math.PI * 2);
+    rctx.fill();
+  }
+
+  const mkTex = (cv: HTMLCanvasElement, srgb: boolean) => {
+    const t = new THREE.CanvasTexture(cv);
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = 8;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  return {
+    map: mkTex(diff, true),
+    normalMap: mkTex(norm, false),
+    roughnessMap: mkTex(rough, false),
+  };
+}
+
+let _wallTextures: ReturnType<typeof makeWallTextures> | null = null;
+function getWallTextures() {
+  if (!_wallTextures) _wallTextures = makeWallTextures();
+  return _wallTextures;
+}
+
 export function LevelMesh({ level }: Props) {
+  const wallTex = useMemo(() => getWallTextures(), []);
   const { wallGeo, accentGeo, edgeGeo, panelGeo, junctions } = useMemo(() => {
     const positions: number[] = [];
     const normals: number[] = [];
@@ -47,7 +193,7 @@ export function LevelMesh({ level }: Props) {
         normals.push(n.x, n.y, n.z);
         colors.push(col.r, col.g, col.b);
       }
-      uvs.push(0, 0, 1, 0, 1, 1, 0, 1);
+      uvs.push(0, 0, 4, 0, 4, 4, 0, 4);
       indices.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
       edgePositions.push(
         a.x, a.y, a.z, b.x, b.y, b.z,
@@ -203,9 +349,12 @@ export function LevelMesh({ level }: Props) {
       <mesh geometry={wallGeo}>
         <meshStandardMaterial
           vertexColors
-          roughness={0.92}
-          metalness={0.25}
-          flatShading
+          map={wallTex.map}
+          normalMap={wallTex.normalMap}
+          roughnessMap={wallTex.roughnessMap}
+          normalScale={new THREE.Vector2(1.2, 1.2)}
+          roughness={1.0}
+          metalness={0.55}
         />
       </mesh>
       <mesh geometry={panelGeo}>
@@ -227,7 +376,7 @@ export function LevelMesh({ level }: Props) {
         />
       </mesh>
       <lineSegments geometry={edgeGeo}>
-        <lineBasicMaterial color="#ff7a2e" transparent opacity={0.18} />
+        <lineBasicMaterial color="#ffaa55" transparent opacity={0.55} toneMapped={false} />
       </lineSegments>
 
       {/* Junction lights — atmospheric colored point lights at intersections */}
