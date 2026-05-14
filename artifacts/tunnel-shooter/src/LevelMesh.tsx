@@ -1,14 +1,31 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { CELL, HALF, type Level } from "./level";
+import { CELL, HALF, type Cell, type Level } from "./level";
 
 type Props = { level: Level };
 
 type Junction = { pos: THREE.Vector3; color: THREE.Color; intensity: number };
 
-// Procedural metal-panel wall texture (diffuse + normal). Runs once per page.
-function makeWallTextures(): { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture } {
+// ---------- Procedural sci-fi industrial wall textures ----------
+// Original art in the genre of dark plated mine/station corridors:
+// big riveted panels, hex vent grilles, conduit runs, warning chevrons.
+// Three variants (steel/tan/warning) are selected per region kind.
+
+type TexOpts = {
+  baseA: string;      // light corner of base gradient
+  baseB: string;      // dark corner of base gradient
+  grooveDark: string; // panel groove color
+  bevel: string;      // bright bevel highlight
+  rivet: string;      // rivet bolt center
+  rivetRim: string;   // rivet bolt edge
+  conduit: string;    // recessed conduit line color
+  hazardA: string;    // hazard stripe color A
+  hazardB: string;    // hazard stripe color B (usually dark)
+  ventDark: string;   // hex vent interior
+};
+
+function makeWallTextures(opts: TexOpts) {
   const SIZE = 512;
   const mk = () => {
     const c = document.createElement("canvas");
@@ -19,122 +36,194 @@ function makeWallTextures(): { map: THREE.Texture; normalMap: THREE.Texture; rou
   // ---- DIFFUSE ----
   const diff = mk();
   const dctx = diff.getContext("2d")!;
-  // Base — brighter so it actually reads under any light
   const grad = dctx.createLinearGradient(0, 0, SIZE, SIZE);
-  grad.addColorStop(0, "#c69970");
-  grad.addColorStop(1, "#8a6040");
+  grad.addColorStop(0, opts.baseA);
+  grad.addColorStop(1, opts.baseB);
   dctx.fillStyle = grad;
   dctx.fillRect(0, 0, SIZE, SIZE);
   // Noise
   const img = dctx.getImageData(0, 0, SIZE, SIZE);
   for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 50;
+    const n = (Math.random() - 0.5) * 45;
     img.data[i] = Math.max(0, Math.min(255, img.data[i]! + n));
-    img.data[i + 1] = Math.max(0, Math.min(255, img.data[i + 1]! + n * 0.85));
-    img.data[i + 2] = Math.max(0, Math.min(255, img.data[i + 2]! + n * 0.7));
+    img.data[i + 1] = Math.max(0, Math.min(255, img.data[i + 1]! + n * 0.9));
+    img.data[i + 2] = Math.max(0, Math.min(255, img.data[i + 2]! + n * 0.85));
   }
   dctx.putImageData(img, 0, 0);
-  // Panel divisions — THICK dark grooves that survive mipmapping
-  dctx.strokeStyle = "rgba(20,10,4,0.95)";
+
+  // Diagonal "armor cut" lines in two quadrants for visual interest
+  dctx.save();
+  dctx.strokeStyle = opts.grooveDark;
+  dctx.lineWidth = 3;
+  dctx.globalAlpha = 0.6;
+  for (let i = -SIZE; i < SIZE; i += 36) {
+    dctx.beginPath();
+    dctx.moveTo(i, 0); dctx.lineTo(i + SIZE / 4, SIZE / 4);
+    dctx.stroke();
+  }
+  dctx.restore();
+
+  // Outer + cross panel grooves (thick dark recesses)
+  dctx.strokeStyle = opts.grooveDark;
   dctx.lineWidth = 10;
   dctx.strokeRect(5, 5, SIZE - 10, SIZE - 10);
   dctx.beginPath();
   dctx.moveTo(SIZE / 2, 0); dctx.lineTo(SIZE / 2, SIZE);
   dctx.moveTo(0, SIZE / 2); dctx.lineTo(SIZE, SIZE / 2);
   dctx.stroke();
-  // Bright bevel highlights right next to grooves — high contrast survives distance
-  dctx.strokeStyle = "rgba(255,220,170,0.85)";
+
+  // Bright bevel highlight just inside grooves
+  dctx.strokeStyle = opts.bevel;
   dctx.lineWidth = 3;
   dctx.strokeRect(14, 14, SIZE - 28, SIZE - 28);
   dctx.beginPath();
   dctx.moveTo(SIZE / 2 + 7, 8); dctx.lineTo(SIZE / 2 + 7, SIZE - 8);
   dctx.moveTo(8, SIZE / 2 + 7); dctx.lineTo(SIZE - 8, SIZE / 2 + 7);
   dctx.stroke();
-  // Rivets — bigger so they survive mip reduction
+
+  // Conduit runs (horizontal pipe shadows in one quadrant)
+  dctx.save();
+  dctx.translate(0, (3 * SIZE) / 4 - 30);
+  for (let i = 0; i < 3; i++) {
+    const y = i * 10;
+    dctx.fillStyle = opts.conduit;
+    dctx.fillRect(SIZE / 2 + 20, y, SIZE / 2 - 30, 4);
+    dctx.fillStyle = opts.bevel;
+    dctx.globalAlpha = 0.5;
+    dctx.fillRect(SIZE / 2 + 20, y + 4, SIZE / 2 - 30, 1);
+    dctx.globalAlpha = 1;
+  }
+  dctx.restore();
+
+  // Rivets — big, dark recess ring + bright bolt
   const rivetR = 11;
   const rivets: Array<[number, number]> = [
     [28, 28], [SIZE - 28, 28], [28, SIZE - 28], [SIZE - 28, SIZE - 28],
     [SIZE / 2, 28], [SIZE / 2, SIZE - 28], [28, SIZE / 2], [SIZE - 28, SIZE / 2],
     [SIZE / 4, SIZE / 4], [(3 * SIZE) / 4, SIZE / 4],
-    [SIZE / 4, (3 * SIZE) / 4], [(3 * SIZE) / 4, (3 * SIZE) / 4],
+    [SIZE / 4, (3 * SIZE) / 4],
   ];
   for (const [x, y] of rivets) {
-    // Dark recess ring
-    dctx.fillStyle = "rgba(0,0,0,0.7)";
+    dctx.fillStyle = "rgba(0,0,0,0.75)";
     dctx.beginPath();
     dctx.arc(x, y, rivetR + 2, 0, Math.PI * 2);
     dctx.fill();
-    // Bright bolt
     const rg = dctx.createRadialGradient(x - 3, y - 3, 0, x, y, rivetR);
-    rg.addColorStop(0, "#fff0d8");
-    rg.addColorStop(0.5, "#d09060");
-    rg.addColorStop(1, "#503020");
+    rg.addColorStop(0, opts.rivet);
+    rg.addColorStop(0.6, opts.rivetRim);
+    rg.addColorStop(1, opts.grooveDark);
     dctx.fillStyle = rg;
     dctx.beginPath();
     dctx.arc(x, y, rivetR, 0, Math.PI * 2);
     dctx.fill();
   }
-  // Hazard stripe — wider and brighter
+
+  // Hexagonal vent grille in upper-right quadrant
+  const ventCx = (3 * SIZE) / 4;
+  const ventCy = SIZE / 4;
+  const ventR = 70;
+  // Dark recessed plate behind grille
+  dctx.fillStyle = opts.grooveDark;
+  dctx.beginPath();
+  dctx.arc(ventCx, ventCy, ventR + 8, 0, Math.PI * 2);
+  dctx.fill();
+  dctx.fillStyle = opts.ventDark;
+  dctx.beginPath();
+  dctx.arc(ventCx, ventCy, ventR, 0, Math.PI * 2);
+  dctx.fill();
+  // Hexagonal grille bars (honeycomb)
+  const hexR = 11;
+  const hexH = Math.sqrt(3) * hexR;
+  for (let row = -5; row <= 5; row++) {
+    for (let col = -5; col <= 5; col++) {
+      const cx = ventCx + col * hexR * 1.5;
+      const cy = ventCy + row * hexH + (col % 2 === 0 ? 0 : hexH / 2);
+      const dx = cx - ventCx, dy = cy - ventCy;
+      if (dx * dx + dy * dy > ventR * ventR) continue;
+      dctx.beginPath();
+      for (let k = 0; k < 6; k++) {
+        const a = (k / 6) * Math.PI * 2;
+        const px = cx + Math.cos(a) * (hexR - 1.5);
+        const py = cy + Math.sin(a) * (hexR - 1.5);
+        if (k === 0) dctx.moveTo(px, py);
+        else dctx.lineTo(px, py);
+      }
+      dctx.closePath();
+      dctx.strokeStyle = opts.bevel;
+      dctx.lineWidth = 1.5;
+      dctx.stroke();
+    }
+  }
+  // Vent rim ring
+  dctx.strokeStyle = opts.bevel;
+  dctx.lineWidth = 3;
+  dctx.beginPath();
+  dctx.arc(ventCx, ventCy, ventR, 0, Math.PI * 2);
+  dctx.stroke();
+
+  // Hazard chevron stripe along the center vertical, between hub and reactor cells
   const stripeW = 28;
   dctx.save();
   dctx.translate(SIZE / 2 - stripeW / 2, 0);
   for (let y = 0; y < SIZE; y += 20) {
-    dctx.fillStyle = (y / 20) % 2 === 0 ? "#ffcc55" : "#100804";
+    dctx.fillStyle = (y / 20) % 2 === 0 ? opts.hazardA : opts.hazardB;
     dctx.fillRect(0, y, stripeW, 20);
   }
   dctx.restore();
 
-  // ---- NORMAL MAP (fake — from grayscale of diffuse using sobel) ----
+  // ---- NORMAL MAP ----
   const norm = mk();
   const nctx = norm.getContext("2d")!;
-  // Start with mid normal (128,128,255)
   nctx.fillStyle = "rgb(128,128,255)";
   nctx.fillRect(0, 0, SIZE, SIZE);
-  // Draw panel grooves as darker indentations into normals: encode by drawing offset highlights/shadows.
-  // Bevel along panel cross
-  nctx.lineWidth = 2;
-  nctx.strokeStyle = "rgb(80,128,255)"; // -X
-  nctx.beginPath();
-  nctx.moveTo(SIZE / 2 - 1, 0); nctx.lineTo(SIZE / 2 - 1, SIZE);
-  nctx.stroke();
-  nctx.strokeStyle = "rgb(176,128,255)"; // +X
-  nctx.beginPath();
-  nctx.moveTo(SIZE / 2 + 1, 0); nctx.lineTo(SIZE / 2 + 1, SIZE);
-  nctx.stroke();
-  nctx.strokeStyle = "rgb(128,80,255)"; // -Y
-  nctx.beginPath();
-  nctx.moveTo(0, SIZE / 2 - 1); nctx.lineTo(SIZE, SIZE / 2 - 1);
-  nctx.stroke();
-  nctx.strokeStyle = "rgb(128,176,255)"; // +Y
-  nctx.beginPath();
-  nctx.moveTo(0, SIZE / 2 + 1); nctx.lineTo(SIZE, SIZE / 2 + 1);
-  nctx.stroke();
+  // Panel groove bevels (encoded as -X/+X on the cross)
+  nctx.lineWidth = 4;
+  nctx.strokeStyle = "rgb(70,128,255)";
+  nctx.beginPath(); nctx.moveTo(SIZE / 2 - 2, 0); nctx.lineTo(SIZE / 2 - 2, SIZE); nctx.stroke();
+  nctx.strokeStyle = "rgb(186,128,255)";
+  nctx.beginPath(); nctx.moveTo(SIZE / 2 + 2, 0); nctx.lineTo(SIZE / 2 + 2, SIZE); nctx.stroke();
+  nctx.strokeStyle = "rgb(128,70,255)";
+  nctx.beginPath(); nctx.moveTo(0, SIZE / 2 - 2); nctx.lineTo(SIZE, SIZE / 2 - 2); nctx.stroke();
+  nctx.strokeStyle = "rgb(128,186,255)";
+  nctx.beginPath(); nctx.moveTo(0, SIZE / 2 + 2); nctx.lineTo(SIZE, SIZE / 2 + 2); nctx.stroke();
   // Outer frame bevel
-  nctx.lineWidth = 3;
+  nctx.lineWidth = 4;
   nctx.strokeStyle = "rgb(160,160,255)";
-  nctx.strokeRect(4, 4, SIZE - 8, SIZE - 8);
+  nctx.strokeRect(8, 8, SIZE - 16, SIZE - 16);
   // Rivet bumps
   for (const [x, y] of rivets) {
-    const rg = nctx.createRadialGradient(x - 1.5, y - 1.5, 0, x, y, 5);
-    rg.addColorStop(0, "rgb(190,190,255)");
+    const rg = nctx.createRadialGradient(x - 3, y - 3, 0, x, y, rivetR);
+    rg.addColorStop(0, "rgb(200,200,255)");
     rg.addColorStop(1, "rgb(128,128,255)");
     nctx.fillStyle = rg;
     nctx.beginPath();
-    nctx.arc(x, y, 5, 0, Math.PI * 2);
+    nctx.arc(x, y, rivetR, 0, Math.PI * 2);
     nctx.fill();
   }
+  // Vent recess (dent inward)
+  const vg = nctx.createRadialGradient(ventCx, ventCy, ventR * 0.5, ventCx, ventCy, ventR);
+  vg.addColorStop(0, "rgb(128,128,200)");
+  vg.addColorStop(1, "rgb(128,128,255)");
+  nctx.fillStyle = vg;
+  nctx.beginPath();
+  nctx.arc(ventCx, ventCy, ventR, 0, Math.PI * 2);
+  nctx.fill();
 
-  // ---- ROUGHNESS (panels rougher, rivets/hazard shinier) ----
+  // ---- ROUGHNESS ----
   const rough = mk();
   const rctx = rough.getContext("2d")!;
-  rctx.fillStyle = "rgb(200,200,200)"; // rough by default
+  rctx.fillStyle = "rgb(200,200,200)";
   rctx.fillRect(0, 0, SIZE, SIZE);
   rctx.fillStyle = "rgb(80,80,80)";
   rctx.fillRect(SIZE / 2 - stripeW / 2, 0, stripeW, SIZE);
+  rctx.fillStyle = "rgb(40,40,40)";
+  rctx.beginPath();
+  rctx.arc(ventCx, ventCy, ventR, 0, Math.PI * 2);
+  rctx.fill();
   for (const [x, y] of rivets) {
-    rctx.fillStyle = "rgb(60,60,60)";
+    rctx.fillStyle = "rgb(50,50,50)";
     rctx.beginPath();
-    rctx.arc(x, y, 4, 0, Math.PI * 2);
+    rctx.arc(x, y, 6, 0, Math.PI * 2);
     rctx.fill();
   }
 
@@ -156,124 +245,109 @@ function makeWallTextures(): { map: THREE.Texture; normalMap: THREE.Texture; rou
   };
 }
 
-let _wallTextures: ReturnType<typeof makeWallTextures> | null = null;
-function getWallTextures() {
-  if (!_wallTextures) _wallTextures = makeWallTextures();
-  return _wallTextures;
+const STEEL_OPTS: TexOpts = {
+  baseA: "#7a8a96", baseB: "#3a4652",
+  grooveDark: "#08101a", bevel: "rgba(200,230,255,0.85)",
+  rivet: "#e0eaf0", rivetRim: "#5a6a7a",
+  conduit: "#0a1018",
+  hazardA: "#3a8acc", hazardB: "#0a1018",
+  ventDark: "#0a1218",
+};
+const TAN_OPTS: TexOpts = {
+  baseA: "#c69970", baseB: "#7a4f2c",
+  grooveDark: "#1a0d05", bevel: "rgba(255,220,170,0.85)",
+  rivet: "#fff0d8", rivetRim: "#a06030",
+  conduit: "#1a0d05",
+  hazardA: "#ffcc55", hazardB: "#100804",
+  ventDark: "#150905",
+};
+const WARNING_OPTS: TexOpts = {
+  baseA: "#8a3a2a", baseB: "#3a0a08",
+  grooveDark: "#10000a", bevel: "rgba(255,200,180,0.85)",
+  rivet: "#ffe0c0", rivetRim: "#702010",
+  conduit: "#1a0508",
+  hazardA: "#ff5522", hazardB: "#1a0408",
+  ventDark: "#180408",
+};
+
+const _texCache = new Map<string, ReturnType<typeof makeWallTextures>>();
+function getTexFor(kind: Cell["kind"]) {
+  const key =
+    kind === "reactor" ? "warning" :
+    kind === "hub" ? "tan" :
+    "steel";
+  let t = _texCache.get(key);
+  if (!t) {
+    const opts =
+      key === "warning" ? WARNING_OPTS :
+      key === "tan" ? TAN_OPTS :
+      STEEL_OPTS;
+    t = makeWallTextures(opts);
+    _texCache.set(key, t);
+  }
+  return t;
 }
 
+// Tint palettes (vertex colors) per region kind. Keep light so they don't darken the texture.
+const KIND_PALETTE: Record<string, THREE.Color[]> = {
+  steel: [
+    new THREE.Color("#d8e0e8"), new THREE.Color("#c0c8d0"),
+    new THREE.Color("#b0b8c0"), new THREE.Color("#a8b0b8"),
+  ],
+  tan: [
+    new THREE.Color("#e0c0a0"), new THREE.Color("#d0a888"),
+    new THREE.Color("#b89878"), new THREE.Color("#c0a890"),
+  ],
+  warning: [
+    new THREE.Color("#e8a090"), new THREE.Color("#d08070"),
+    new THREE.Color("#c07060"), new THREE.Color("#a86050"),
+  ],
+};
+function kindKey(k: Cell["kind"]): "steel" | "tan" | "warning" {
+  return k === "reactor" ? "warning" : k === "hub" ? "tan" : "steel";
+}
+
+// Accent rim color per kind (the glowing inset frame around walls).
+const KIND_ACCENT: Record<string, { color: string; emissive: string }> = {
+  steel:   { color: "#5ad1ff", emissive: "#1a90ff" },
+  tan:     { color: "#ff8a3a", emissive: "#ff5a1a" },
+  warning: { color: "#ff3344", emissive: "#ff1122" },
+};
+
 export function LevelMesh({ level }: Props) {
-  const wallTex = useMemo(() => getWallTextures(), []);
-  const { wallGeo, accentGeo, edgeGeo, panelGeo, junctions } = useMemo(() => {
-    const positions: number[] = [];
-    const normals: number[] = [];
-    const uvs: number[] = [];
-    const colors: number[] = [];
-    const indices: number[] = [];
-
-    const accentPos: number[] = [];
-    const accentNorm: number[] = [];
-    const accentIdx: number[] = [];
-
-    const panelPos: number[] = [];
-    const panelNorm: number[] = [];
-    const panelIdx: number[] = [];
-
+  // Build one set of geometry/texture per region kind so each can use its own texture.
+  const built = useMemo(() => {
+    type PerKind = {
+      tex: ReturnType<typeof makeWallTextures>;
+      wallGeo: THREE.BufferGeometry;
+      accentGeo: THREE.BufferGeometry;
+      panelGeo: THREE.BufferGeometry;
+      accent: { color: string; emissive: string };
+    };
+    const kinds: Array<"steel" | "tan" | "warning"> = ["steel", "tan", "warning"];
+    const buffers: Record<string, {
+      pos: number[]; nrm: number[]; uv: number[]; col: number[]; idx: number[];
+      ap: number[]; an: number[]; ai: number[];
+      pp: number[]; pn: number[]; pi: number[];
+      vi: number; aiIdx: number; piIdx: number;
+    }> = {};
+    for (const k of kinds) {
+      buffers[k] = {
+        pos: [], nrm: [], uv: [], col: [], idx: [],
+        ap: [], an: [], ai: [],
+        pp: [], pn: [], pi: [],
+        vi: 0, aiIdx: 0, piIdx: 0,
+      };
+    }
     const edgePositions: number[] = [];
     const junctions: Junction[] = [];
 
-    let vi = 0;
-    let ai = 0;
-    let pi = 0;
-
-    const palette = [
-      new THREE.Color("#e0c0a0"),
-      new THREE.Color("#d0a888"),
-      new THREE.Color("#b89878"),
-      new THREE.Color("#c0a890"),
-      new THREE.Color("#a88868"),
-    ];
-
-    function quad(
-      a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, d: THREE.Vector3,
-      n: THREE.Vector3, col: THREE.Color,
-    ) {
-      positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, d.x, d.y, d.z);
-      for (let i = 0; i < 4; i++) {
-        normals.push(n.x, n.y, n.z);
-        colors.push(col.r, col.g, col.b);
-      }
-      uvs.push(0, 0, 2, 0, 2, 2, 0, 2);
-      indices.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
-      edgePositions.push(
-        a.x, a.y, a.z, b.x, b.y, b.z,
-        b.x, b.y, b.z, c.x, c.y, c.z,
-        c.x, c.y, c.z, d.x, d.y, d.z,
-        d.x, d.y, d.z, a.x, a.y, a.z,
-      );
-      vi += 4;
-    }
-
-    // Inset accent strip on a wall: a thin emissive border just inside the face perimeter,
-    // pushed slightly off the wall toward the cell interior so it reads as a glowing rim.
-    function accentFrame(
-      a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, d: THREE.Vector3,
-      n: THREE.Vector3,
-    ) {
-      const inset = 1.4;
-      const off = 0.08;
-      // Shrink toward face center
-      const center = a.clone().add(b).add(c).add(d).multiplyScalar(0.25);
-      const shrink = (v: THREE.Vector3, factor: number) =>
-        v.clone().lerp(center, factor).addScaledVector(n, off);
-      const A1 = shrink(a, 0); const B1 = shrink(b, 0);
-      const C1 = shrink(c, 0); const D1 = shrink(d, 0);
-      const k = inset / HALF; // fraction
-      const A2 = shrink(a, k); const B2 = shrink(b, k);
-      const C2 = shrink(c, k); const D2 = shrink(d, k);
-
-      // 4 quads making a frame
-      const frame = [
-        [A1, B1, B2, A2],
-        [B1, C1, C2, B2],
-        [C1, D1, D2, C2],
-        [D1, A1, A2, D2],
-      ];
-      for (const [P, Q, R, S] of frame) {
-        accentPos.push(P!.x, P!.y, P!.z, Q!.x, Q!.y, Q!.z, R!.x, R!.y, R!.z, S!.x, S!.y, S!.z);
-        for (let i = 0; i < 4; i++) accentNorm.push(n.x, n.y, n.z);
-        accentIdx.push(ai, ai + 1, ai + 2, ai, ai + 2, ai + 3);
-        ai += 4;
-      }
-    }
-
-    // Decorative recessed panel in the center of a wall (slightly behind the wall plane,
-    // a darker meshStandard, evokes Descent-style metal panels).
-    function panel(
-      a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, d: THREE.Vector3,
-      n: THREE.Vector3,
-    ) {
-      const inset = 3.2;
-      const off = -0.18; // recessed
-      const center = a.clone().add(b).add(c).add(d).multiplyScalar(0.25);
-      const k = inset / HALF;
-      const shrink = (v: THREE.Vector3) =>
-        v.clone().lerp(center, k).addScaledVector(n, off);
-      const A = shrink(a); const B = shrink(b); const C = shrink(c); const D = shrink(d);
-      panelPos.push(A.x, A.y, A.z, B.x, B.y, B.z, C.x, C.y, C.z, D.x, D.y, D.z);
-      for (let i = 0; i < 4; i++) panelNorm.push(n.x, n.y, n.z);
-      panelIdx.push(pi, pi + 1, pi + 2, pi, pi + 2, pi + 3);
-      pi += 4;
-    }
-
-    // Junction palette
     const junctionColors = [
-      new THREE.Color("#ff7a2e"),
-      new THREE.Color("#ffaa44"),
-      new THREE.Color("#ff5522"),
-      new THREE.Color("#33ccff"),
-      new THREE.Color("#88ddff"),
+      new THREE.Color("#ff7a2e"), new THREE.Color("#ffaa44"),
+      new THREE.Color("#33ccff"), new THREE.Color("#88ddff"),
+      new THREE.Color("#aaff66"), new THREE.Color("#ff5522"),
     ];
+
     let cellIdx = 0;
     for (const cell of level.cells.values()) {
       const ox = cell.x * CELL;
@@ -282,18 +356,23 @@ export function LevelMesh({ level }: Props) {
       const p = (sx: number, sy: number, sz: number) =>
         new THREE.Vector3(ox + sx * HALF, oy + sy * HALF, oz + sz * HALF);
 
+      const kk = kindKey(cell.kind);
+      const palette = KIND_PALETTE[kk]!;
       const cellTone = palette[(Math.abs(cell.x * 73 + cell.y * 31 + cell.z * 17)) % palette.length]!;
+      const buf = buffers[kk]!;
 
-      // Place a junction light at any cell with 3+ openings — rooms feel atmospheric.
       const openCount =
         Number(cell.open.px) + Number(cell.open.nx) +
         Number(cell.open.py) + Number(cell.open.ny) +
         Number(cell.open.pz) + Number(cell.open.nz);
       if (openCount >= 3 || cellIdx % 4 === 0) {
+        const baseColor = cell.kind === "reactor"
+          ? new THREE.Color("#ff4422")
+          : junctionColors[(cell.x + cell.y + cell.z + 100) % junctionColors.length]!;
         junctions.push({
           pos: new THREE.Vector3(ox, oy + HALF * 0.7, oz),
-          color: junctionColors[(cell.x + cell.y + cell.z + 100) % junctionColors.length]!,
-          intensity: openCount >= 4 ? 18 : 10,
+          color: baseColor,
+          intensity: openCount >= 4 ? 22 : 12,
         });
       }
       cellIdx++;
@@ -318,89 +397,146 @@ export function LevelMesh({ level }: Props) {
 
       for (const f of faces) {
         if (f.open) continue;
-        quad(f.a, f.b, f.c, f.d, f.n, cellTone);
-        accentFrame(f.a, f.b, f.c, f.d, f.n);
-        // Random recessed panel
+        // Quad
+        buf.pos.push(f.a.x, f.a.y, f.a.z, f.b.x, f.b.y, f.b.z, f.c.x, f.c.y, f.c.z, f.d.x, f.d.y, f.d.z);
+        for (let i = 0; i < 4; i++) {
+          buf.nrm.push(f.n.x, f.n.y, f.n.z);
+          buf.col.push(cellTone.r, cellTone.g, cellTone.b);
+        }
+        buf.uv.push(0, 0, 2, 0, 2, 2, 0, 2);
+        buf.idx.push(buf.vi, buf.vi + 1, buf.vi + 2, buf.vi, buf.vi + 2, buf.vi + 3);
+        edgePositions.push(
+          f.a.x, f.a.y, f.a.z, f.b.x, f.b.y, f.b.z,
+          f.b.x, f.b.y, f.b.z, f.c.x, f.c.y, f.c.z,
+          f.c.x, f.c.y, f.c.z, f.d.x, f.d.y, f.d.z,
+          f.d.x, f.d.y, f.d.z, f.a.x, f.a.y, f.a.z,
+        );
+        buf.vi += 4;
+
+        // Accent frame: 4 quads as a thin inset border, pushed slightly off the wall
+        const inset = 1.4;
+        const off = 0.08;
+        const center = f.a.clone().add(f.b).add(f.c).add(f.d).multiplyScalar(0.25);
+        const shrink = (v: THREE.Vector3, factor: number) =>
+          v.clone().lerp(center, factor).addScaledVector(f.n, off);
+        const A1 = shrink(f.a, 0), B1 = shrink(f.b, 0), C1 = shrink(f.c, 0), D1 = shrink(f.d, 0);
+        const k = inset / HALF;
+        const A2 = shrink(f.a, k), B2 = shrink(f.b, k), C2 = shrink(f.c, k), D2 = shrink(f.d, k);
+        const frameQuads = [
+          [A1, B1, B2, A2], [B1, C1, C2, B2],
+          [C1, D1, D2, C2], [D1, A1, A2, D2],
+        ];
+        for (const fq of frameQuads) {
+          const [P, Q, R, S] = fq;
+          buf.ap.push(P!.x, P!.y, P!.z, Q!.x, Q!.y, Q!.z, R!.x, R!.y, R!.z, S!.x, S!.y, S!.z);
+          for (let i = 0; i < 4; i++) buf.an.push(f.n.x, f.n.y, f.n.z);
+          buf.ai.push(buf.aiIdx, buf.aiIdx + 1, buf.aiIdx + 2, buf.aiIdx, buf.aiIdx + 2, buf.aiIdx + 3);
+          buf.aiIdx += 4;
+        }
+
+        // Recessed panel — sparse
         const h = (cell.x * 131 + cell.y * 71 + cell.z * 53 + Math.round(f.n.x + f.n.y * 2 + f.n.z * 3)) >>> 0;
         if ((h % 3) === 0) {
-          panel(f.a, f.b, f.c, f.d, f.n);
+          const pInset = 3.2;
+          const pOff = -0.18;
+          const pk = pInset / HALF;
+          const ps = (v: THREE.Vector3) => v.clone().lerp(center, pk).addScaledVector(f.n, pOff);
+          const PA = ps(f.a), PB = ps(f.b), PC = ps(f.c), PD = ps(f.d);
+          buf.pp.push(PA.x, PA.y, PA.z, PB.x, PB.y, PB.z, PC.x, PC.y, PC.z, PD.x, PD.y, PD.z);
+          for (let i = 0; i < 4; i++) buf.pn.push(f.n.x, f.n.y, f.n.z);
+          buf.pi.push(buf.piIdx, buf.piIdx + 1, buf.piIdx + 2, buf.piIdx, buf.piIdx + 2, buf.piIdx + 3);
+          buf.piIdx += 4;
         }
       }
     }
 
-    const wallGeo = new THREE.BufferGeometry();
-    wallGeo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    wallGeo.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-    wallGeo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    wallGeo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-    wallGeo.setIndex(indices);
-    wallGeo.computeBoundingSphere();
+    const perKind: Record<string, PerKind> = {};
+    for (const k of kinds) {
+      const b = buffers[k]!;
+      const wallGeo = new THREE.BufferGeometry();
+      wallGeo.setAttribute("position", new THREE.Float32BufferAttribute(b.pos, 3));
+      wallGeo.setAttribute("normal", new THREE.Float32BufferAttribute(b.nrm, 3));
+      wallGeo.setAttribute("uv", new THREE.Float32BufferAttribute(b.uv, 2));
+      wallGeo.setAttribute("color", new THREE.Float32BufferAttribute(b.col, 3));
+      wallGeo.setIndex(b.idx);
+      wallGeo.computeBoundingSphere();
 
-    const accentGeo = new THREE.BufferGeometry();
-    accentGeo.setAttribute("position", new THREE.Float32BufferAttribute(accentPos, 3));
-    accentGeo.setAttribute("normal", new THREE.Float32BufferAttribute(accentNorm, 3));
-    accentGeo.setIndex(accentIdx);
-    accentGeo.computeBoundingSphere();
+      const accentGeo = new THREE.BufferGeometry();
+      accentGeo.setAttribute("position", new THREE.Float32BufferAttribute(b.ap, 3));
+      accentGeo.setAttribute("normal", new THREE.Float32BufferAttribute(b.an, 3));
+      accentGeo.setIndex(b.ai);
+      accentGeo.computeBoundingSphere();
 
-    const panelGeo = new THREE.BufferGeometry();
-    panelGeo.setAttribute("position", new THREE.Float32BufferAttribute(panelPos, 3));
-    panelGeo.setAttribute("normal", new THREE.Float32BufferAttribute(panelNorm, 3));
-    panelGeo.setIndex(panelIdx);
-    panelGeo.computeBoundingSphere();
+      const panelGeo = new THREE.BufferGeometry();
+      panelGeo.setAttribute("position", new THREE.Float32BufferAttribute(b.pp, 3));
+      panelGeo.setAttribute("normal", new THREE.Float32BufferAttribute(b.pn, 3));
+      panelGeo.setIndex(b.pi);
+      panelGeo.computeBoundingSphere();
+
+      perKind[k] = {
+        tex: getTexFor(k === "warning" ? "reactor" : k === "tan" ? "hub" : "corridor"),
+        wallGeo, accentGeo, panelGeo,
+        accent: KIND_ACCENT[k]!,
+      };
+    }
 
     const edgeGeo = new THREE.BufferGeometry();
     edgeGeo.setAttribute("position", new THREE.Float32BufferAttribute(edgePositions, 3));
 
-    return { wallGeo, accentGeo, edgeGeo, panelGeo, junctions };
+    return { perKind, edgeGeo, junctions };
   }, [level]);
+
+  const kinds: Array<"steel" | "tan" | "warning"> = ["steel", "tan", "warning"];
 
   return (
     <group>
-      <mesh geometry={wallGeo}>
-        <meshStandardMaterial
-          vertexColors
-          map={wallTex.map}
-          normalMap={wallTex.normalMap}
-          roughnessMap={wallTex.roughnessMap}
-          normalScale={new THREE.Vector2(1.6, 1.6)}
-          roughness={0.75}
-          metalness={0.05}
-          emissive="#1a0d05"
-          emissiveIntensity={0.6}
-          emissiveMap={wallTex.map}
-        />
-      </mesh>
-      <mesh geometry={panelGeo}>
-        <meshStandardMaterial
-          color="#1a1410"
-          roughness={0.45}
-          metalness={0.85}
-          flatShading
-        />
-      </mesh>
-      <mesh geometry={accentGeo}>
-        <meshStandardMaterial
-          color="#ff8a3a"
-          emissive="#ff5a1a"
-          emissiveIntensity={2.2}
-          roughness={0.4}
-          metalness={0.6}
-          toneMapped={false}
-        />
-      </mesh>
-      <lineSegments geometry={edgeGeo}>
-        <lineBasicMaterial color="#ffaa55" transparent opacity={0.55} toneMapped={false} />
+      {kinds.map((k) => {
+        const pk = built.perKind[k]!;
+        return (
+          <group key={k}>
+            <mesh geometry={pk.wallGeo}>
+              <meshStandardMaterial
+                vertexColors
+                map={pk.tex.map}
+                normalMap={pk.tex.normalMap}
+                roughnessMap={pk.tex.roughnessMap}
+                normalScale={new THREE.Vector2(1.6, 1.6)}
+                roughness={0.7}
+                metalness={0.1}
+                emissive={k === "warning" ? "#3a0808" : k === "steel" ? "#08101a" : "#1a0d05"}
+                emissiveIntensity={k === "warning" ? 0.9 : 0.55}
+                emissiveMap={pk.tex.map}
+              />
+            </mesh>
+            <mesh geometry={pk.panelGeo}>
+              <meshStandardMaterial
+                color={k === "warning" ? "#1a0808" : k === "steel" ? "#0d1218" : "#1a1410"}
+                roughness={0.4}
+                metalness={0.85}
+                flatShading
+              />
+            </mesh>
+            <mesh geometry={pk.accentGeo}>
+              <meshStandardMaterial
+                color={pk.accent.color}
+                emissive={pk.accent.emissive}
+                emissiveIntensity={k === "warning" ? 3.0 : 2.2}
+                roughness={0.4}
+                metalness={0.6}
+                toneMapped={false}
+              />
+            </mesh>
+          </group>
+        );
+      })}
+
+      <lineSegments geometry={built.edgeGeo}>
+        <lineBasicMaterial color="#ffaa55" transparent opacity={0.45} toneMapped={false} />
       </lineSegments>
 
-      {/* Junction lights — atmospheric colored point lights at intersections */}
-      {junctions.map((j, i) => (
+      {built.junctions.map((j, i) => (
         <group key={i} position={[j.pos.x, j.pos.y, j.pos.z]}>
-          <pointLight
-            color={j.color}
-            intensity={j.intensity}
-            distance={CELL * 1.6}
-            decay={2}
-          />
+          <pointLight color={j.color} intensity={j.intensity} distance={CELL * 1.8} decay={2} />
           <mesh>
             <sphereGeometry args={[0.35, 10, 10]} />
             <meshBasicMaterial color={j.color} toneMapped={false} />
@@ -441,37 +577,23 @@ function Reactor({ pos }: { pos: THREE.Vector3 }) {
 
   return (
     <group position={[pos.x, pos.y, pos.z]}>
-      {/* Glowing inner core */}
       <mesh ref={coreRef}>
         <sphereGeometry args={[1.6, 24, 24]} />
         <meshStandardMaterial
-          color="#ff5a55"
-          emissive="#ff2244"
-          emissiveIntensity={4}
-          toneMapped={false}
+          color="#ff5a55" emissive="#ff2244" emissiveIntensity={4} toneMapped={false}
         />
       </mesh>
-      {/* Outer protective shell — wireframe icosahedron */}
       <mesh ref={shellRef}>
         <icosahedronGeometry args={[3.2, 1]} />
         <meshStandardMaterial
-          color="#ffaa66"
-          emissive="#ff5522"
-          emissiveIntensity={1.4}
-          wireframe
-          toneMapped={false}
+          color="#ffaa66" emissive="#ff5522" emissiveIntensity={1.4} wireframe toneMapped={false}
         />
       </mesh>
-      {/* Equatorial ring */}
       <mesh ref={ringRef} rotation={[Math.PI / 2, 0, 0]}>
         <torusGeometry args={[3.6, 0.18, 12, 48]} />
         <meshStandardMaterial
-          color="#ffcc88"
-          emissive="#ff7733"
-          emissiveIntensity={2.0}
-          metalness={0.9}
-          roughness={0.2}
-          toneMapped={false}
+          color="#ffcc88" emissive="#ff7733" emissiveIntensity={2.0}
+          metalness={0.9} roughness={0.2} toneMapped={false}
         />
       </mesh>
       <pointLight ref={lightRef} color="#ff4422" intensity={14} distance={50} decay={2} />
