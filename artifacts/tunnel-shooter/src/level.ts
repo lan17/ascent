@@ -368,6 +368,117 @@ export function clampToLevel(level: Level, pos: THREE.Vector3, prev: THREE.Vecto
   return out;
 }
 
+export function neighborCells(
+  level: Level,
+  x: number, y: number, z: number,
+): Array<[number, number, number]> {
+  const c = level.cells.get(key(x, y, z));
+  if (!c) return [];
+  const out: Array<[number, number, number]> = [];
+  if (c.open.px) out.push([x + 1, y, z]);
+  if (c.open.nx) out.push([x - 1, y, z]);
+  if (c.open.py) out.push([x, y + 1, z]);
+  if (c.open.ny) out.push([x, y - 1, z]);
+  if (c.open.pz) out.push([x, y, z + 1]);
+  if (c.open.nz) out.push([x, y, z - 1]);
+  return out;
+}
+
+// Axis-aligned line-of-sight between two cells: cells must agree on at least
+// two axes. Walks the open faces between them. Returns cell-distance on
+// success, or -1 if the path is blocked / not axis-aligned.
+export function losAxisAligned(
+  level: Level,
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  maxSteps = 16,
+): number {
+  const sameX = ax === bx, sameY = ay === by, sameZ = az === bz;
+  if (sameX && sameY && sameZ) return 0;
+  const diffs = (sameX ? 0 : 1) + (sameY ? 0 : 1) + (sameZ ? 0 : 1);
+  if (diffs !== 1) return -1;
+  let dx = 0, dy = 0, dz = 0;
+  let oa: keyof Cell["open"], ob: keyof Cell["open"];
+  if (!sameX) {
+    dx = bx > ax ? 1 : -1;
+    oa = dx > 0 ? "px" : "nx";
+    ob = dx > 0 ? "nx" : "px";
+  } else if (!sameY) {
+    dy = by > ay ? 1 : -1;
+    oa = dy > 0 ? "py" : "ny";
+    ob = dy > 0 ? "ny" : "py";
+  } else {
+    dz = bz > az ? 1 : -1;
+    oa = dz > 0 ? "pz" : "nz";
+    ob = dz > 0 ? "nz" : "pz";
+  }
+  let cx = ax, cy = ay, cz = az;
+  let steps = 0;
+  while (cx !== bx || cy !== by || cz !== bz) {
+    const c = level.cells.get(key(cx, cy, cz));
+    if (!c || !c.open[oa]) return -1;
+    cx += dx; cy += dy; cz += dz;
+    const n = level.cells.get(key(cx, cy, cz));
+    if (!n || !n.open[ob]) return -1;
+    steps++;
+    if (steps > maxSteps) return -1;
+  }
+  return steps;
+}
+
+// BFS through open faces. Returns the first cell to step into on the shortest
+// path from `from` to `to`, or null if `to` is not reachable within maxDepth.
+export function bfsNextStep(
+  level: Level,
+  fromX: number, fromY: number, fromZ: number,
+  toX: number, toY: number, toZ: number,
+  maxDepth = 8,
+): [number, number, number] | null {
+  if (fromX === toX && fromY === toY && fromZ === toZ) return null;
+  const startK = key(fromX, fromY, fromZ);
+  const parents = new Map<CellKey, CellKey | null>();
+  parents.set(startK, null);
+  let frontier: Array<[number, number, number]> = [[fromX, fromY, fromZ]];
+  let foundK: CellKey | null = null;
+  let depth = 0;
+  let visitedCount = 1;
+  while (frontier.length && depth < maxDepth && !foundK && visitedCount < 256) {
+    const next: Array<[number, number, number]> = [];
+    for (const p of frontier) {
+      const cell = level.cells.get(key(p[0], p[1], p[2]));
+      if (!cell) continue;
+      const px = p[0], py = p[1], pz = p[2];
+      const cur = key(px, py, pz);
+      const tryStep = (nx: number, ny: number, nz: number) => {
+        const nk = key(nx, ny, nz);
+        if (parents.has(nk)) return false;
+        parents.set(nk, cur);
+        visitedCount++;
+        if (nx === toX && ny === toY && nz === toZ) { foundK = nk; return true; }
+        next.push([nx, ny, nz]);
+        return false;
+      };
+      if (cell.open.px && tryStep(px + 1, py, pz)) break;
+      if (cell.open.nx && tryStep(px - 1, py, pz)) break;
+      if (cell.open.py && tryStep(px, py + 1, pz)) break;
+      if (cell.open.ny && tryStep(px, py - 1, pz)) break;
+      if (cell.open.pz && tryStep(px, py, pz + 1)) break;
+      if (cell.open.nz && tryStep(px, py, pz - 1)) break;
+    }
+    frontier = next;
+    depth++;
+  }
+  if (!foundK) return null;
+  let curK: CellKey = foundK;
+  let parentK = parents.get(curK) ?? null;
+  while (parentK && parentK !== startK) {
+    curK = parentK;
+    parentK = parents.get(curK) ?? null;
+  }
+  const parts = curK.split(",");
+  return [Number(parts[0]), Number(parts[1]), Number(parts[2])];
+}
+
 export function pointInLevel(level: Level, pos: THREE.Vector3): boolean {
   const cx = Math.round(pos.x / CELL);
   const cy = Math.round(pos.y / CELL);

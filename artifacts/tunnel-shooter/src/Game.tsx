@@ -5,7 +5,7 @@ import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh } from "./LevelMesh";
 import { MapView } from "./MapView";
-import { clampToLevel, generateLevel, key, CELL, type Level } from "./level";
+import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, CELL, type Level } from "./level";
 import { initialState, type GameState, type Laser, type Robot } from "./gameStore";
 
 type Explosion = {
@@ -313,6 +313,7 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
       g.visible = true;
       const tt = t + r.bobPhase;
       g.position.copy(r.pos);
+      g.position.y += Math.sin(tt * 1.2) * 0.5;
       g.rotation.y = tt * 0.6;
       const ring = ringRefs.current[i];
       if (ring) {
@@ -573,30 +574,98 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       }
     }
 
-    // Robot AI
+    // Robot AI: patrol corridors, pursue when LOS or short BFS path to player.
     const robots = refs.robots;
+    const pcx = Math.round(refs.shipPos.x / CELL);
+    const pcy = Math.round(refs.shipPos.y / CELL);
+    const pcz = Math.round(refs.shipPos.z / CELL);
     for (let i = 0; i < robots.length; i++) {
       const r = robots[i]!;
       if (!r.alive) continue;
       r.bobPhase += d;
-      r.pos.y += Math.sin(r.bobPhase * 1.2) * 0.04 * d * 30;
       r.fireCooldown -= d;
-      _vt.copy(refs.shipPos).sub(r.pos);
-      const dist = _vt.length();
-      if (dist < 28 && r.fireCooldown <= 0) {
-        const rcx = Math.round(r.pos.x / CELL);
-        const rcy = Math.round(r.pos.y / CELL);
-        const rcz = Math.round(r.pos.z / CELL);
-        const pcx = Math.round(refs.shipPos.x / CELL);
-        const pcy = Math.round(refs.shipPos.y / CELL);
-        const pcz = Math.round(refs.shipPos.z / CELL);
-        if (rcx === pcx && rcy === pcy && rcz === pcz) {
-          r.fireCooldown = 1.4 + Math.random() * 0.8;
-          _vt.normalize();
-          _vu.copy(r.pos).addScaledVector(_vt, 1.5);
-          spawnLaser(refs, _vu, _vt, true);
+      r.aiTimer -= d;
+
+      const rcx = Math.round(r.pos.x / CELL);
+      const rcy = Math.round(r.pos.y / CELL);
+      const rcz = Math.round(r.pos.z / CELL);
+
+      // Periodically (or when waypoint reached) decide mode + pick a target cell.
+      const reachedTarget =
+        !r.targetCell ||
+        (r.targetCell[0] === rcx && r.targetCell[1] === rcy && r.targetCell[2] === rcz);
+      if (r.aiTimer <= 0 || reachedTarget) {
+        r.aiTimer = 0.4 + Math.random() * 0.3;
+
+        const losDist = losAxisAligned(refs.level, rcx, rcy, rcz, pcx, pcy, pcz);
+        let nextStep: [number, number, number] | null = null;
+        if (losDist >= 0 && losDist <= 8) {
+          // Walk straight toward the player.
+          const dx = pcx === rcx ? 0 : pcx > rcx ? 1 : -1;
+          const dy = pcy === rcy ? 0 : pcy > rcy ? 1 : -1;
+          const dz = pcz === rcz ? 0 : pcz > rcz ? 1 : -1;
+          if (dx || dy || dz) nextStep = [rcx + dx, rcy + dy, rcz + dz];
+          r.mode = "chase";
         } else {
-          r.fireCooldown = 0.6;
+          // Try short BFS to player.
+          const step = bfsNextStep(refs.level, rcx, rcy, rcz, pcx, pcy, pcz, 8);
+          if (step) {
+            nextStep = step;
+            r.mode = "chase";
+          } else {
+            r.mode = "patrol";
+          }
+        }
+
+        if (r.mode === "patrol" || !nextStep) {
+          // Pick a random open neighbor; avoid backtracking when possible.
+          const nbrs = neighborCells(refs.level, rcx, rcy, rcz);
+          if (nbrs.length > 0) {
+            let pool = nbrs;
+            if (r.lastCell && nbrs.length > 1) {
+              const filtered = nbrs.filter(
+                (n) => !(n[0] === r.lastCell![0] && n[1] === r.lastCell![1] && n[2] === r.lastCell![2]),
+              );
+              if (filtered.length > 0) pool = filtered;
+            }
+            nextStep = pool[Math.floor(Math.random() * pool.length)]!;
+          }
+        }
+
+        if (reachedTarget) r.lastCell = [rcx, rcy, rcz];
+        r.targetCell = nextStep;
+      }
+
+      // Move toward the current target cell center.
+      if (r.targetCell) {
+        _vt.set(
+          r.targetCell[0] * CELL,
+          r.targetCell[1] * CELL,
+          r.targetCell[2] * CELL,
+        ).sub(r.pos);
+        const stepDist = _vt.length();
+        if (stepDist > 0.0001) {
+          const speed = r.mode === "chase" ? 9 : 4.5;
+          const move = Math.min(stepDist, speed * d);
+          r.pos.addScaledVector(_vt, move / stepDist);
+        }
+      }
+
+      // Fire when same cell or with axis-aligned LOS.
+      if (r.fireCooldown <= 0) {
+        _vu.copy(refs.shipPos).sub(r.pos);
+        const distToPlayer = _vu.length();
+        if (distToPlayer < 32) {
+          const sameCell = rcx === pcx && rcy === pcy && rcz === pcz;
+          const losD = sameCell ? 0 : losAxisAligned(refs.level, rcx, rcy, rcz, pcx, pcy, pcz);
+          if (sameCell || losD >= 0) {
+            r.fireCooldown = 1.4 + Math.random() * 0.8;
+            _vu.normalize();
+            _vt.copy(r.pos).addScaledVector(_vu, 1.5);
+            spawnLaser(refs, _vt, _vu, true);
+          } else {
+            r.fireCooldown = 0.5;
+          }
         }
       }
     }
@@ -710,6 +779,10 @@ function GameInner() {
       fireCooldown: 1 + Math.random() * 2,
       bobPhase: Math.random() * 6.28,
       alive: true,
+      mode: "patrol",
+      targetCell: null,
+      lastCell: null,
+      aiTimer: Math.random() * 0.4,
     }));
     const lasers: Laser[] = [];
     for (let i = 0; i < LASER_POOL_SIZE; i++) {
@@ -850,6 +923,11 @@ function GameInner() {
       r.alive = true;
       r.hp = 50;
       r.pos.copy(level.enemySpawns[i]!);
+      r.mode = "patrol";
+      r.targetCell = null;
+      r.lastCell = null;
+      r.aiTimer = Math.random() * 0.4;
+      r.fireCooldown = 1 + Math.random() * 2;
     });
     (level as any).reactorHp = 200;
   };

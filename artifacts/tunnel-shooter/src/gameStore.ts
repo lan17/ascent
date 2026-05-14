@@ -16,6 +16,10 @@ export type Robot = {
   fireCooldown: number;
   bobPhase: number;
   alive: boolean;
+  mode: "patrol" | "chase";
+  targetCell: [number, number, number] | null;
+  lastCell: [number, number, number] | null;
+  aiTimer: number;
 };
 
 export type GameState = {
