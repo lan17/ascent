@@ -5,7 +5,7 @@ import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh } from "./LevelMesh";
 import { MapView } from "./MapView";
-import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, CELL, type Level } from "./level";
+import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, CELL, HALF, type Level } from "./level";
 import {
   initialState,
   ROBOT_ARCHETYPES,
@@ -1124,6 +1124,9 @@ function GameInner() {
         state={hudState}
         onStart={startGame}
       />
+      {hudState.status === "playing" && !mapOpen && (
+        <MiniRadar refs={refs} />
+      )}
       {mapOpen && hudState.status === "playing" && (
         <MapView
           level={level}
@@ -1163,6 +1166,212 @@ function Headlight({ refs }: { refs: SharedRefs }) {
       penumbra={0.55}
       decay={1.3}
     />
+  );
+}
+
+function MiniRadar({ refs }: { refs: SharedRefs }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    const SIZE = 180;
+    const R = SIZE / 2;
+    const WORLD_R = 90;
+    const scale = R / WORLD_R;
+    const yWindow = CELL * 1.5;
+    const fwd = new THREE.Vector3();
+
+    let raf = 0;
+    const render = () => {
+      raf = requestAnimationFrame(render);
+      if (refs.hud.current.status !== "playing") {
+        ctx.clearRect(0, 0, SIZE, SIZE);
+        return;
+      }
+
+      const sp = refs.shipPos;
+      fwd.set(0, 0, -1).applyQuaternion(refs.shipQuat);
+      const yaw = Math.atan2(fwd.x, -fwd.z);
+      const c = Math.cos(-yaw);
+      const s = Math.sin(-yaw);
+
+      const proj = (wx: number, wz: number): [number, number] => {
+        const dx = wx - sp.x;
+        const dz = wz - sp.z;
+        const rx = dx * c - dz * s;
+        const rz = dx * s + dz * c;
+        return [R + rx * scale, R + rz * scale];
+      };
+
+      ctx.clearRect(0, 0, SIZE, SIZE);
+
+      // Background disc
+      ctx.fillStyle = "rgba(8, 12, 16, 0.65)";
+      ctx.beginPath();
+      ctx.arc(R, R, R - 1, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Clip to circle for level content
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(R, R, R - 2, 0, Math.PI * 2);
+      ctx.clip();
+
+      // Rooms — top-down slice near ship Y
+      for (const room of refs.level.rooms) {
+        const minY = room.min[1] * CELL - HALF;
+        const maxY = room.max[1] * CELL + HALF;
+        if (sp.y < minY - yWindow || sp.y > maxY + yWindow) continue;
+        const minX = room.min[0] * CELL - HALF;
+        const maxX = room.max[0] * CELL + HALF;
+        const minZ = room.min[2] * CELL - HALF;
+        const maxZ = room.max[2] * CELL + HALF;
+        const p0 = proj(minX, minZ);
+        const p1 = proj(maxX, minZ);
+        const p2 = proj(maxX, maxZ);
+        const p3 = proj(minX, maxZ);
+        const color =
+          room.kind === "reactor" ? "#ff3344" :
+          room.kind === "hub" ? "#ff8a3a" : "#7a55ff";
+        ctx.beginPath();
+        ctx.moveTo(p0[0], p0[1]);
+        ctx.lineTo(p1[0], p1[1]);
+        ctx.lineTo(p2[0], p2[1]);
+        ctx.lineTo(p3[0], p3[1]);
+        ctx.closePath();
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.globalAlpha = 0.9;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      // Corridors — thin connector lines
+      ctx.strokeStyle = "#3a8acc";
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 2;
+      for (const cor of refs.level.corridors) {
+        for (let i = 0; i < cor.path.length - 1; i++) {
+          const a = cor.path[i]!;
+          const b = cor.path[i + 1]!;
+          const ay = a[1] * CELL;
+          const by = b[1] * CELL;
+          if ((sp.y < ay - yWindow && sp.y < by - yWindow) ||
+              (sp.y > ay + yWindow && sp.y > by + yWindow)) continue;
+          const pa = proj(a[0] * CELL, a[2] * CELL);
+          const pb = proj(b[0] * CELL, b[2] * CELL);
+          ctx.beginPath();
+          ctx.moveTo(pa[0], pa[1]);
+          ctx.lineTo(pb[0], pb[1]);
+          ctx.stroke();
+        }
+      }
+      ctx.globalAlpha = 1;
+
+      // Robots within radar range
+      for (const rb of refs.robots) {
+        if (!rb.alive) continue;
+        const dx = rb.pos.x - sp.x;
+        const dz = rb.pos.z - sp.z;
+        if (Math.hypot(dx, dz) > WORLD_R) continue;
+        const dy = rb.pos.y - sp.y;
+        const [px, py] = proj(rb.pos.x, rb.pos.z);
+        ctx.fillStyle = "#ffcc22";
+        ctx.beginPath();
+        ctx.arc(px, py, 3, 0, Math.PI * 2);
+        ctx.fill();
+        if (Math.abs(dy) > CELL * 0.7) {
+          ctx.strokeStyle = "#ffcc22";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          ctx.lineTo(px, py + (dy > 0 ? -6 : 6));
+          ctx.stroke();
+        }
+      }
+
+      // Reactor — always visible; clamp to edge if out of range.
+      // Even after destruction, keep showing direction so players can find
+      // the wrecked reactor chamber.
+      {
+        const alive = refs.hud.current.reactorAlive;
+        const rx = refs.level.reactor.x - sp.x;
+        const rz = refs.level.reactor.z - sp.z;
+        const rrx = rx * c - rz * s;
+        const rrz = rx * s + rz * c;
+        const distPx = Math.hypot(rrx, rrz) * scale;
+        let sx: number, sy: number, edge = false;
+        if (distPx <= R - 10) {
+          sx = R + rrx * scale;
+          sy = R + rrz * scale;
+        } else {
+          const k = (R - 12) / distPx;
+          sx = R + rrx * scale * k;
+          sy = R + rrz * scale * k;
+          edge = true;
+        }
+        const pulse = alive ? 0.65 + 0.35 * Math.sin(performance.now() * 0.008) : 0.5;
+        ctx.globalAlpha = pulse;
+        ctx.fillStyle = alive ? "#ff3344" : "#6a6a72";
+        ctx.beginPath();
+        ctx.arc(sx, sy, edge ? 5 : 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        if (edge) {
+          const ang = Math.atan2(rrz, rrx);
+          ctx.strokeStyle = alive ? "#ff5566" : "#8a8a92";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx + Math.cos(ang) * 8, sy + Math.sin(ang) * 8);
+          ctx.stroke();
+        }
+      }
+
+      ctx.restore();
+
+      // Crosshair lines
+      ctx.strokeStyle = "rgba(255, 138, 58, 0.18)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(R, 4); ctx.lineTo(R, SIZE - 4);
+      ctx.moveTo(4, R); ctx.lineTo(SIZE - 4, R);
+      ctx.stroke();
+
+      // Ship marker — triangle pointing up (ship forward)
+      ctx.fillStyle = "#aaffbb";
+      ctx.strokeStyle = "#0a1a14";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(R, R - 8);
+      ctx.lineTo(R - 5, R + 5);
+      ctx.lineTo(R + 5, R + 5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Outer ring
+      ctx.strokeStyle = "rgba(255, 138, 58, 0.6)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(R, R, R - 1, 0, Math.PI * 2);
+      ctx.stroke();
+    };
+    raf = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(raf);
+  }, [refs]);
+
+  return (
+    <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-orange-500/40 bg-black/40 shadow-lg">
+      <canvas ref={canvasRef} width={180} height={180} className="block rounded-full" />
+    </div>
   );
 }
 
