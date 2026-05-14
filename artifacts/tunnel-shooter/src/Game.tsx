@@ -8,12 +8,22 @@ import { MapView } from "./MapView";
 import { clampToLevel, generateLevel, key, CELL, type Level } from "./level";
 import { initialState, type GameState, type Laser, type Robot } from "./gameStore";
 
+type Explosion = {
+  active: boolean;
+  pos: THREE.Vector3;
+  life: number;
+  maxLife: number;
+  size: number;
+  kind: "spark" | "robot" | "reactor";
+};
+
 type SharedRefs = {
   shipPos: THREE.Vector3;
   shipQuat: THREE.Quaternion;
   shipVel: THREE.Vector3;
   lasers: Laser[];
   robots: Robot[];
+  explosions: Explosion[];
   level: Level;
   setHud: React.Dispatch<React.SetStateAction<GameState>>;
   hud: React.MutableRefObject<GameState>;
@@ -40,6 +50,7 @@ const _quatA = new THREE.Quaternion();
 
 // ---------- Pool sizing ----------
 const LASER_POOL_SIZE = 64;
+const EXPLOSION_POOL_SIZE = 32;
 
 // ---------- Shared geometries / materials ----------
 const LASER_CORE_GEO = new THREE.CylinderGeometry(0.08, 0.08, 1.8, 6);
@@ -77,10 +88,39 @@ const ROBOT_HALO_MAT = new THREE.MeshBasicMaterial({
   blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
 });
 
+const EXPLOSION_CORE_GEO = new THREE.IcosahedronGeometry(1, 1);
+const EXPLOSION_HALO_GEO = new THREE.SphereGeometry(1, 12, 12);
+const EXPLOSION_RING_GEO = new THREE.RingGeometry(0.7, 1.0, 24);
+
+const EXPLOSION_PALETTE: Record<Explosion["kind"], { core: string; halo: string; ring: string }> = {
+  spark:   { core: "#ffd28a", halo: "#ff9a44", ring: "#ffb066" },
+  robot:   { core: "#bfffd6", halo: "#33ff88", ring: "#88ffbb" },
+  reactor: { core: "#fff0b0", halo: "#ff6a1a", ring: "#ffaa55" },
+};
+
 const SHIP_RING_GEO = new THREE.RingGeometry(0.08, 0.1, 24);
 const SHIP_RING_MAT = new THREE.MeshBasicMaterial({
   color: "#ff7a2e", transparent: true, opacity: 0.7, side: THREE.DoubleSide,
 });
+
+function spawnExplosion(refs: SharedRefs, pos: THREE.Vector3, kind: Explosion["kind"]) {
+  const pool = refs.explosions;
+  const cfg =
+    kind === "reactor" ? { life: 1.1, size: 6.5 } :
+    kind === "robot"   ? { life: 0.7, size: 3.2 } :
+                         { life: 0.28, size: 1.0 };
+  for (let i = 0; i < pool.length; i++) {
+    const E = pool[i]!;
+    if (E.active) continue;
+    E.active = true;
+    E.kind = kind;
+    E.life = cfg.life;
+    E.maxLife = cfg.life;
+    E.size = cfg.size;
+    E.pos.copy(pos);
+    return;
+  }
+}
 
 function spawnLaser(refs: SharedRefs, pos: THREE.Vector3, dir: THREE.Vector3, hostile: boolean) {
   const pool = refs.lasers;
@@ -312,6 +352,123 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
   );
 }
 
+function ExplosionPool({ refs }: { refs: SharedRefs }) {
+  const groupRefs = useRef<(THREE.Group | null)[]>([]);
+  const coreMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
+  const haloMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
+  const ringMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
+  const ringMeshRefs = useRef<(THREE.Mesh | null)[]>([]);
+  const { camera } = useThree();
+
+  useFrame((state, dt) => {
+    const d = Math.min(dt, 0.05);
+    const pool = refs.explosions;
+    for (let i = 0; i < pool.length; i++) {
+      const E = pool[i]!;
+      const g = groupRefs.current[i];
+      if (!g) continue;
+      if (!E.active) {
+        if (g.visible) g.visible = false;
+        continue;
+      }
+      E.life -= d;
+      if (E.life <= 0) {
+        E.active = false;
+        g.visible = false;
+        continue;
+      }
+      const u = 1 - E.life / E.maxLife;
+      const fade = 1 - u;
+      const coreScale = E.size * (0.35 + u * 0.55);
+      const haloScale = E.size * (0.6 + u * 1.0);
+      const ringScale = E.size * (0.7 + u * 1.4);
+
+      g.visible = true;
+      g.position.copy(E.pos);
+
+      const core = g.children[0] as THREE.Mesh | undefined;
+      const halo = g.children[1] as THREE.Mesh | undefined;
+      if (core) {
+        core.scale.setScalar(coreScale);
+        core.rotation.x = state.clock.elapsedTime * 6 + i;
+        core.rotation.y = state.clock.elapsedTime * 4 + i;
+      }
+      if (halo) halo.scale.setScalar(haloScale);
+
+      const ring = ringMeshRefs.current[i];
+      if (ring) {
+        ring.scale.setScalar(ringScale);
+        // Billboard the ring toward the camera
+        ring.lookAt(camera.position);
+      }
+
+      const palette = EXPLOSION_PALETTE[E.kind];
+      const coreMat = coreMatRefs.current[i];
+      const haloMat = haloMatRefs.current[i];
+      const ringMat = ringMatRefs.current[i];
+      if (coreMat) {
+        coreMat.color.set(palette.core);
+        coreMat.opacity = Math.min(1, fade * 1.2);
+      }
+      if (haloMat) {
+        haloMat.color.set(palette.halo);
+        haloMat.opacity = fade * 0.55;
+      }
+      if (ringMat) {
+        ringMat.color.set(palette.ring);
+        ringMat.opacity = fade * 0.8;
+      }
+    }
+  });
+
+  const slots = useMemo(
+    () => Array.from({ length: EXPLOSION_POOL_SIZE }, (_, i) => i),
+    [],
+  );
+  return (
+    <>
+      {slots.map((i) => (
+        <group key={i} visible={false} ref={(el) => { groupRefs.current[i] = el; }}>
+          <mesh geometry={EXPLOSION_CORE_GEO}>
+            <meshBasicMaterial
+              transparent
+              depthWrite={false}
+              toneMapped={false}
+              blending={THREE.AdditiveBlending}
+              color="#ffd28a"
+              ref={(m) => { coreMatRefs.current[i] = m; }}
+            />
+          </mesh>
+          <mesh geometry={EXPLOSION_HALO_GEO}>
+            <meshBasicMaterial
+              transparent
+              depthWrite={false}
+              toneMapped={false}
+              blending={THREE.AdditiveBlending}
+              color="#ff9a44"
+              ref={(m) => { haloMatRefs.current[i] = m; }}
+            />
+          </mesh>
+          <mesh
+            geometry={EXPLOSION_RING_GEO}
+            ref={(el) => { ringMeshRefs.current[i] = el; }}
+          >
+            <meshBasicMaterial
+              transparent
+              depthWrite={false}
+              toneMapped={false}
+              blending={THREE.AdditiveBlending}
+              side={THREE.DoubleSide}
+              color="#ffb066"
+              ref={(m) => { ringMatRefs.current[i] = m; }}
+            />
+          </mesh>
+        </group>
+      ))}
+    </>
+  );
+}
+
 function GameLoop({ refs }: { refs: SharedRefs }) {
   useFrame((_, dt) => {
     if (refs.hud.current.status !== "playing") return;
@@ -344,6 +501,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
             dmg -= absorbed;
           }
           hud.health -= dmg;
+          spawnExplosion(refs, L.pos, "spark");
           L.active = false;
           if (hud.health <= 0) {
             hud.health = 0;
@@ -362,8 +520,10 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
           if (!R.alive) continue;
           if (L.pos.distanceToSquared(R.pos) < 1.8 * 1.8) {
             R.hp -= 25;
+            spawnExplosion(refs, L.pos, "spark");
             if (R.hp <= 0) {
               R.alive = false;
+              spawnExplosion(refs, R.pos, "robot");
               const hud = refs.hud.current;
               hud.score += 100;
               hud.enemiesLeft -= 1;
@@ -382,9 +542,11 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
           if (L.pos.distanceToSquared(refs.level.reactor) < 3.5 * 3.5) {
             const hud = refs.hud.current;
             hud.score += 25;
+            spawnExplosion(refs, L.pos, "spark");
             (refs.level as any).reactorHp = ((refs.level as any).reactorHp ?? 200) - 25;
             if ((refs.level as any).reactorHp <= 0) {
               hud.reactorAlive = false;
+              spawnExplosion(refs, refs.level.reactor, "reactor");
               hud.score += 1000;
               if (hud.enemiesLeft <= 0) {
                 hud.status = "won";
@@ -406,6 +568,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       if ((lx > H && !cell.open.px) || (lx < -H && !cell.open.nx) ||
           (ly > H && !cell.open.py) || (ly < -H && !cell.open.ny) ||
           (lz > H && !cell.open.pz) || (lz < -H && !cell.open.nz)) {
+        spawnExplosion(refs, L.pos, "spark");
         L.active = false;
       }
     }
@@ -559,12 +722,24 @@ function GameInner() {
         active: false,
       });
     }
+    const explosions: Explosion[] = [];
+    for (let i = 0; i < EXPLOSION_POOL_SIZE; i++) {
+      explosions.push({
+        active: false,
+        pos: new THREE.Vector3(),
+        life: 0,
+        maxLife: 1,
+        size: 1,
+        kind: "spark",
+      });
+    }
     return {
       shipPos: level.start.clone(),
       shipQuat: new THREE.Quaternion(),
       shipVel: new THREE.Vector3(),
       lasers,
       robots,
+      explosions,
       level,
       setHud: setHudState,
       hud: hudRef,
@@ -670,6 +845,7 @@ function GameInner() {
     refs.shipQuat.identity();
     refs.shipVel.set(0, 0, 0);
     for (let i = 0; i < refs.lasers.length; i++) refs.lasers[i]!.active = false;
+    for (let i = 0; i < refs.explosions.length; i++) refs.explosions[i]!.active = false;
     refs.robots.forEach((r, i) => {
       r.alive = true;
       r.hp = 50;
@@ -707,6 +883,7 @@ function GameInner() {
         <GameLoop refs={refs} />
         <LaserPool refs={refs} />
         <RobotPool refs={refs} />
+        <ExplosionPool refs={refs} />
         <Headlight refs={refs} />
         <EffectComposer multisampling={0}>
           <Bloom
