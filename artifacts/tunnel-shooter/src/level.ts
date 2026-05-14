@@ -523,10 +523,18 @@ export function generateLevel(seed = 1): Level {
   // Filter out any candidate whose cell center is occupied by a prop. ----
   const enemySpawns: THREE.Vector3[] = [];
   // Exclude the entire starting hub so the player has a safe "ready room"
-  // before any combat. Robots only appear once you've left the spawn room.
-  const startRoomForSpawns = rooms.find((r) => roomContains(r, 0, 0, 0)) ?? startRoom;
+  // before any combat. Use the explicit startRoom reference (not a lookup) so
+  // an overlapping non-hub room can't accidentally shrink the exclusion zone.
+  // Also add a small buffer in cell-space around the hub so robots can't stand
+  // just outside a doorway and shoot the player on spawn.
+  const SPAWN_BUFFER_XZ = 2;
+  const SPAWN_BUFFER_Y = 1;
   for (const c of cells.values()) {
-    if (roomContains(startRoomForSpawns, c.x, c.y, c.z)) continue;
+    if (roomContains(startRoom, c.x, c.y, c.z)) continue;
+    const dx = Math.max(startRoom.min[0] - c.x, 0, c.x - startRoom.max[0]);
+    const dy = Math.max(startRoom.min[1] - c.y, 0, c.y - startRoom.max[1]);
+    const dz = Math.max(startRoom.min[2] - c.z, 0, c.z - startRoom.max[2]);
+    if (dx <= SPAWN_BUFFER_XZ && dz <= SPAWN_BUFFER_XZ && dy <= SPAWN_BUFFER_Y) continue;
     if (c.kind === "reactor") continue;
     if (((c.x * 73 + c.y * 31 + c.z * 17) & 7) >= 3) continue;
     const wx = c.x * CELL, wy = c.y * CELL, wz = c.z * CELL;
