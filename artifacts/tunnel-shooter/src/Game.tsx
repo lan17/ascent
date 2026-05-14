@@ -5,7 +5,7 @@ import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh } from "./LevelMesh";
 import { MapView } from "./MapView";
-import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, CELL, HALF, type Level } from "./level";
+import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, resolveShipProps, CELL, HALF, type Level } from "./level";
 import {
   initialState,
   ROBOT_ARCHETYPES,
@@ -454,6 +454,26 @@ function ShipController({ refs }: { refs: SharedRefs }) {
         if (Math.abs(_vDiff.z) > 0.0001) refs.shipVel.z = 0;
         refs.shipPos.copy(c2);
       }
+    }
+
+    // Ship-vs-prop blocking: tests AABBs in current cell + immediate neighbors.
+    const propPush = resolveShipProps(refs.level, refs.shipPos, SHIP_R);
+    if (propPush.x > 0 || propPush.y > 0 || propPush.z > 0) {
+      // Zero velocity on each axis that received a push so we don't grind into
+      // the prop, and treat a meaningful push as a contact for shake/damage.
+      const impact = Math.max(
+        propPush.x > 1e-4 ? Math.abs(refs.shipVel.x) : 0,
+        propPush.y > 1e-4 ? Math.abs(refs.shipVel.y) : 0,
+        propPush.z > 1e-4 ? Math.abs(refs.shipVel.z) : 0,
+      );
+      if (propPush.x > 1e-4) refs.shipVel.x = 0;
+      if (propPush.y > 1e-4) refs.shipVel.y = 0;
+      if (propPush.z > 1e-4) refs.shipVel.z = 0;
+      registerContact(refs, impact, "wall");
+      // Re-clamp to walls in case the prop push pressed us against a wall.
+      _vPrev.copy(refs.shipPos);
+      const c3 = clampToLevel(refs.level, refs.shipPos, _vPrev);
+      if (!c3.equals(refs.shipPos)) refs.shipPos.copy(c3);
     }
 
     // --- Camera (with impact shake) ---
@@ -1136,18 +1156,27 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
         }
       }
 
-      // Fire when same cell or with axis-aligned LOS.
+      // Fire when same cell or with axis-aligned LOS — but only after the
+      // robot has actually spotted the player at least once. This keeps the
+      // starting moments quiet so the player can orient before combat.
       if (r.fireCooldown <= 0) {
         _vu.copy(refs.shipPos).sub(r.pos);
         const distToPlayer = _vu.length();
         if (distToPlayer < arch.fireRange) {
           const sameCell = rcx === pcx && rcy === pcy && rcz === pcz;
           const losD = sameCell ? 0 : losAxisAligned(refs.level, rcx, rcy, rcz, pcx, pcy, pcz);
-          if (sameCell || losD >= 0) {
-            r.fireCooldown = arch.fireMin + Math.random() * (arch.fireMax - arch.fireMin);
-            _vu.normalize();
-            _vt.copy(r.pos).addScaledVector(_vu, 1.5);
-            spawnLaser(refs, _vt, _vu, true, arch.laserSpeed, arch.damage);
+          const hasLOS = sameCell || losD >= 0;
+          if (hasLOS) {
+            if (!r.hasSeenPlayer) {
+              // First sighting: short "spotted you" beat before the first shot.
+              r.hasSeenPlayer = true;
+              r.fireCooldown = 0.4 + Math.random() * 0.3;
+            } else {
+              r.fireCooldown = arch.fireMin + Math.random() * (arch.fireMax - arch.fireMin);
+              _vu.normalize();
+              _vt.copy(r.pos).addScaledVector(_vu, 1.5);
+              spawnLaser(refs, _vt, _vu, true, arch.laserSpeed, arch.damage);
+            }
           } else {
             r.fireCooldown = 0.5;
           }
@@ -1293,6 +1322,7 @@ function GameInner() {
         cellOffset: new THREE.Vector3(),
         strafeTimer: Math.random() * 0.5,
         hitFlash: 0,
+        hasSeenPlayer: false,
       };
     });
     const lasers: Laser[] = [];
@@ -1476,6 +1506,7 @@ function GameInner() {
       r.fireCooldown = 1 + Math.random() * 2;
       r.cellOffset.set(0, 0, 0);
       r.strafeTimer = Math.random() * 0.5;
+      r.hasSeenPlayer = false;
     });
     (level as any).reactorHp = 200;
   };

@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { CELL, HALF, type Cell, type Level } from "./level";
+import { CELL, HALF, type Cell, type Level, type Prop, type PropKind } from "./level";
 
 type Props = { level: Level };
 
@@ -548,9 +548,204 @@ export function LevelMesh({ level }: Props) {
         </group>
       ))}
 
+      <PropField props={level.props} />
+
       <Reactor pos={level.reactor} />
     </group>
   );
+}
+
+// ---------- Interior props ----------
+// Each room cell may contain a handful of props placed against walls. Geometries
+// and materials are shared across all instances of a given kind+biome to keep
+// draw setup cheap.
+
+const PROP_BIOME_COLORS: Record<"steel" | "tan" | "warning", {
+  body: string; trim: string; emissive: string; accent: string;
+}> = {
+  steel:   { body: "#5d6772", trim: "#9aaab8", emissive: "#1a90ff", accent: "#5ad1ff" },
+  tan:     { body: "#8a6a4a", trim: "#c69970", emissive: "#ff5a1a", accent: "#ff8a3a" },
+  warning: { body: "#5a2a22", trim: "#a04438", emissive: "#ff2a1a", accent: "#ff5544" },
+};
+
+const _PROP_BODY_MATS = new Map<string, THREE.MeshStandardMaterial>();
+function bodyMat(biome: "steel" | "tan" | "warning") {
+  const k = `b:${biome}`;
+  let m = _PROP_BODY_MATS.get(k);
+  if (!m) {
+    const c = PROP_BIOME_COLORS[biome];
+    m = new THREE.MeshStandardMaterial({
+      color: c.body, metalness: 0.6, roughness: 0.55, flatShading: true,
+    });
+    _PROP_BODY_MATS.set(k, m);
+  }
+  return m;
+}
+const _PROP_TRIM_MATS = new Map<string, THREE.MeshStandardMaterial>();
+function trimMat(biome: "steel" | "tan" | "warning") {
+  const k = `t:${biome}`;
+  let m = _PROP_TRIM_MATS.get(k);
+  if (!m) {
+    const c = PROP_BIOME_COLORS[biome];
+    m = new THREE.MeshStandardMaterial({
+      color: c.trim, metalness: 0.85, roughness: 0.35, flatShading: true,
+    });
+    _PROP_TRIM_MATS.set(k, m);
+  }
+  return m;
+}
+const _PROP_GLOW_MATS = new Map<string, THREE.MeshStandardMaterial>();
+function glowMat(biome: "steel" | "tan" | "warning") {
+  const k = `g:${biome}`;
+  let m = _PROP_GLOW_MATS.get(k);
+  if (!m) {
+    const c = PROP_BIOME_COLORS[biome];
+    m = new THREE.MeshStandardMaterial({
+      color: c.accent, emissive: c.emissive, emissiveIntensity: 2.4,
+      metalness: 0.4, roughness: 0.3, toneMapped: false,
+    });
+    _PROP_GLOW_MATS.set(k, m);
+  }
+  return m;
+}
+const HAZARD_MAT = new THREE.MeshStandardMaterial({
+  color: "#ffcc22", emissive: "#ffaa11", emissiveIntensity: 1.2,
+  metalness: 0.3, roughness: 0.5, toneMapped: false,
+});
+
+const BOX = new THREE.BoxGeometry(1, 1, 1);
+const CYL_8 = new THREE.CylinderGeometry(1, 1, 1, 10);
+const CYL_TAPER = new THREE.CylinderGeometry(0.85, 1, 1, 10);
+const TORUS = new THREE.TorusGeometry(1, 0.06, 6, 16);
+
+function PropField({ props }: { props: Prop[] }) {
+  return (
+    <group>
+      {props.map((p, i) => (
+        <PropMesh key={i} p={p} />
+      ))}
+    </group>
+  );
+}
+
+function PropMesh({ p }: { p: Prop }) {
+  const body = bodyMat(p.biome);
+  const trim = trimMat(p.biome);
+  const glow = glowMat(p.biome);
+  const hx = p.half[0], hy = p.half[1], hz = p.half[2];
+  const setMatrixOnce = (g: THREE.Group | null) => {
+    if (g) { g.updateMatrix(); g.matrixAutoUpdate = false; }
+  };
+  switch (p.kind as PropKind) {
+    case "column": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={CYL_8} material={body} scale={[hx, hy * 2, hz]} />
+          <mesh geometry={CYL_8} material={trim} scale={[hx * 0.55, hy * 0.04, hz * 0.55]} position={[0, hy - 0.4, 0]} />
+          <mesh geometry={CYL_8} material={trim} scale={[hx * 0.55, hy * 0.04, hz * 0.55]} position={[0, -hy + 0.4, 0]} />
+          <mesh geometry={CYL_8} material={glow} scale={[hx * 0.35, hy * 0.05, hz * 0.35]} position={[0, hy - 1.4, 0]} />
+        </group>
+      );
+    }
+    case "warning_column": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={CYL_8} material={body} scale={[hx, hy * 2, hz]} />
+          {/* hazard stripes */}
+          <mesh geometry={CYL_8} material={HAZARD_MAT} scale={[hx * 1.04, 0.3, hz * 1.04]} position={[0, hy - 2.2, 0]} />
+          <mesh geometry={CYL_8} material={HAZARD_MAT} scale={[hx * 1.04, 0.3, hz * 1.04]} position={[0, hy - 4.6, 0]} />
+          <mesh geometry={CYL_8} material={glow} scale={[hx * 0.4, 0.2, hz * 0.4]} position={[0, hy - 0.6, 0]} />
+        </group>
+      );
+    }
+    case "server_rack": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={BOX} material={body} scale={[hx * 2, hy * 2, hz * 2]} />
+          <mesh geometry={BOX} material={trim} scale={[hx * 0.4, hy * 0.15, hz * 2.05]} position={[hx * 0.55, hy - 0.5, 0]} />
+          {/* glowing screen strip */}
+          <mesh geometry={BOX} material={glow} scale={[hx * 1.6, 0.25, 0.05]} position={[0, hy * 0.55, hz + 0.02]} />
+          <mesh geometry={BOX} material={glow} scale={[hx * 1.6, 0.25, 0.05]} position={[0, 0, hz + 0.02]} />
+          <mesh geometry={BOX} material={glow} scale={[hx * 1.6, 0.25, 0.05]} position={[0, -hy * 0.55, hz + 0.02]} />
+        </group>
+      );
+    }
+    case "generator": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={BOX} material={body} scale={[hx * 2, hy * 2 * 0.85, hz * 2]} position={[0, -hy * 0.075, 0]} />
+          {/* coil cylinder on top */}
+          <mesh geometry={CYL_8} material={trim} scale={[hx * 0.7, hy * 0.4, hz * 0.7]} position={[0, hy * 0.8, 0]} />
+          <mesh geometry={TORUS} material={glow} scale={[hx * 0.7, hy * 0.7, hx * 0.7]} rotation={[Math.PI / 2, 0, 0]} position={[0, hy * 0.85, 0]} />
+          <mesh geometry={BOX} material={glow} scale={[hx * 0.8, 0.12, 0.04]} position={[0, -hy * 0.2, hz + 0.02]} />
+        </group>
+      );
+    }
+    case "coolant_tank": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={CYL_TAPER} material={body} scale={[hx, hy * 2 * 0.85, hz]} position={[0, -hy * 0.075, 0]} />
+          <mesh geometry={CYL_8} material={trim} scale={[hx * 0.95, 0.4, hz * 0.95]} position={[0, hy * 0.8, 0]} />
+          <mesh geometry={TORUS} material={glow} scale={[hx * 0.95, hy * 0.95, hx * 0.95]} rotation={[Math.PI / 2, 0, 0]} position={[0, hy * 0.4, 0]} />
+          <mesh geometry={TORUS} material={glow} scale={[hx * 0.95, hy * 0.95, hx * 0.95]} rotation={[Math.PI / 2, 0, 0]} position={[0, -hy * 0.3, 0]} />
+        </group>
+      );
+    }
+    case "console": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={BOX} material={body} scale={[hx * 2, hy * 2 * 0.6, hz * 2]} position={[0, -hy * 0.2, 0]} />
+          {/* angled screen */}
+          <mesh geometry={BOX} material={trim} scale={[hx * 1.8, hy * 1.0, 0.3]} position={[0, hy * 0.3, -hz * 0.4]} rotation={[-0.3, 0, 0]} />
+          <mesh geometry={BOX} material={glow} scale={[hx * 1.5, hy * 0.7, 0.05]} position={[0, hy * 0.35, -hz * 0.4 + 0.18]} rotation={[-0.3, 0, 0]} />
+        </group>
+      );
+    }
+    case "crate": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={BOX} material={body} scale={[hx * 2, hy * 2, hz * 2]} />
+          {/* corner braces */}
+          <mesh geometry={BOX} material={trim} scale={[0.2, hy * 2.05, 0.2]} position={[ hx - 0.1, 0,  hz - 0.1]} />
+          <mesh geometry={BOX} material={trim} scale={[0.2, hy * 2.05, 0.2]} position={[-hx + 0.1, 0,  hz - 0.1]} />
+          <mesh geometry={BOX} material={trim} scale={[0.2, hy * 2.05, 0.2]} position={[ hx - 0.1, 0, -hz + 0.1]} />
+          <mesh geometry={BOX} material={trim} scale={[0.2, hy * 2.05, 0.2]} position={[-hx + 0.1, 0, -hz + 0.1]} />
+          <mesh geometry={BOX} material={glow} scale={[hx * 0.6, 0.06, 0.04]} position={[0, hy * 0.1, hz + 0.01]} />
+        </group>
+      );
+    }
+    case "barrel": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={CYL_8} material={body} scale={[hx, hy * 2, hz]} />
+          <mesh geometry={CYL_8} material={trim} scale={[hx * 1.04, 0.18, hz * 1.04]} position={[0, hy * 0.4, 0]} />
+          <mesh geometry={CYL_8} material={trim} scale={[hx * 1.04, 0.18, hz * 1.04]} position={[0, -hy * 0.4, 0]} />
+          <mesh geometry={CYL_8} material={glow} scale={[hx * 0.35, 0.08, hz * 0.35]} position={[0, hy + 0.05, 0]} />
+        </group>
+      );
+    }
+    case "pipes": {
+      // 3 stacked horizontal pipes running along X
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={CYL_8} material={trim} scale={[0.5, hx * 2, 0.5]} position={[0, -hy * 0.4, 0]} rotation={[0, 0, Math.PI / 2]} />
+          <mesh geometry={CYL_8} material={trim} scale={[0.45, hx * 2, 0.45]} position={[0, 0.0, hz * 0.3]} rotation={[0, 0, Math.PI / 2]} />
+          <mesh geometry={CYL_8} material={body} scale={[0.55, hx * 2, 0.55]} position={[0, hy * 0.4, -hz * 0.2]} rotation={[0, 0, Math.PI / 2]} />
+          {/* glow valve */}
+          <mesh geometry={CYL_8} material={glow} scale={[0.18, 0.6, 0.18]} position={[hx * 0.3, hy * 0.4 + 0.5, -hz * 0.2]} />
+        </group>
+      );
+    }
+    case "tank": {
+      return (
+        <group position={p.pos} rotation={[0, p.rotY, 0]} ref={setMatrixOnce}>
+          <mesh geometry={CYL_TAPER} material={body} scale={[hx, hy * 2, hz]} />
+          <mesh geometry={TORUS} material={trim} scale={[hx * 0.9, hx * 0.9, hx * 0.9]} rotation={[Math.PI / 2, 0, 0]} position={[0, hy * 0.6, 0]} />
+          <mesh geometry={TORUS} material={glow} scale={[hx * 0.9, hx * 0.9, hx * 0.9]} rotation={[Math.PI / 2, 0, 0]} position={[0, -hy * 0.2, 0]} />
+        </group>
+      );
+    }
+  }
 }
 
 function Reactor({ pos }: { pos: THREE.Vector3 }) {
