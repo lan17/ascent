@@ -122,6 +122,8 @@ export type Robot = {
   strafeTimer: number;
   hitFlash: number;
   hasSeenPlayer: boolean;
+  // Decays each frame after firing; drives recoil/muzzle-flash animations.
+  muzzleFlash: number;
 };
 
 export type GameState = {

@@ -178,13 +178,11 @@ const EXPLOSION_POOL_SIZE = 32;
 const DEBRIS_POOL_SIZE = 60;
 const DEBRIS_PER_DEATH = 7;
 
-// Debris reuses the existing robot sub-geometries (hull shard, belt fragment,
-// ring fragment) at a smaller display scale so chunks read as "pieces of that
-// robot." Collider radii are matched to the displayed size.
-// (Initialized below once ROBOT_* geometries are declared.)
-let DEBRIS_GEOS: THREE.BufferGeometry[] = [];
-let DEBRIS_DISPLAY_SCALES: number[] = [];
-let DEBRIS_RADII: number[] = [];
+// Debris uses geometries matching each archetype's visible model parts so the
+// chunks read as pieces of the robot that just blew up. Per-kind arrays are
+// initialized below alongside the archetype geometry definitions.
+let DEBRIS_GEOS_BY_KIND: Record<RobotKind, THREE.BufferGeometry[]>;
+let DEBRIS_RADII_BY_KIND: Record<RobotKind, number[]>;
 
 // ---------- Shared geometries / materials ----------
 const LASER_CORE_GEO = new THREE.CylinderGeometry(0.08, 0.08, 1.8, 6);
@@ -201,21 +199,69 @@ const LASER_HALO_MAT_HOSTILE = new THREE.MeshBasicMaterial({
   blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
 });
 
-const ROBOT_HULL_GEO = new THREE.OctahedronGeometry(1.4, 0);
-const ROBOT_BELT_GEO = new THREE.TorusGeometry(1.05, 0.18, 8, 16);
-const ROBOT_RING_GEO = new THREE.TorusGeometry(1.7, 0.05, 6, 32);
+// ---------- Per-archetype robot model geometries ----------
+// Each archetype has a distinct silhouette built from primitives. Sizes are
+// tuned so the robot fits roughly inside a sphere of radius ~1.4 at scale=1,
+// matching the original collider/hit radius used by gameplay.
 
-// Debris reuses the robot sub-geometries directly. Mesh scale shrinks them to
-// chunk size; collider radius matches the rendered radius.
-DEBRIS_GEOS = [ROBOT_HULL_GEO, ROBOT_BELT_GEO, ROBOT_RING_GEO];
-DEBRIS_DISPLAY_SCALES = [0.4, 0.5, 0.35];
-DEBRIS_RADII = [
-  1.4 * DEBRIS_DISPLAY_SCALES[0]!,            // hull shard ~0.56
-  (1.05 + 0.18) * DEBRIS_DISPLAY_SCALES[1]!,  // belt fragment ~0.62
-  (1.7 + 0.05) * DEBRIS_DISPLAY_SCALES[2]!,   // ring fragment ~0.61
-];
-const ROBOT_EYE_GEO = new THREE.SphereGeometry(0.5, 16, 16);
-const ROBOT_HALO_GEO = new THREE.SphereGeometry(0.85, 12, 12);
+const ROBOT_HALO_GEO = new THREE.SphereGeometry(0.95, 12, 12);
+
+// Scout: small insect/drone — central pod, 2 spinning rotor blades, antennae, eye.
+const SCOUT_BODY_GEO = new THREE.SphereGeometry(0.55, 12, 12);
+const SCOUT_ARM_GEO = new THREE.BoxGeometry(1.4, 0.12, 0.18);
+const SCOUT_ROTOR_HUB_GEO = new THREE.CylinderGeometry(0.12, 0.12, 0.18, 8);
+const SCOUT_ROTOR_BLADE_GEO = new THREE.BoxGeometry(1.1, 0.04, 0.14);
+const SCOUT_ANTENNA_GEO = new THREE.CylinderGeometry(0.04, 0.02, 0.7, 6);
+const SCOUT_ANTENNA_TIP_GEO = new THREE.SphereGeometry(0.08, 8, 8);
+const SCOUT_EYE_GEO = new THREE.SphereGeometry(0.16, 10, 10);
+
+// Grunt: chunky bipedal infantry — torso, head, two arms (one with gun), legs.
+const GRUNT_TORSO_GEO = new THREE.BoxGeometry(1.15, 0.95, 0.7);
+const GRUNT_HEAD_GEO = new THREE.BoxGeometry(0.55, 0.45, 0.55);
+const GRUNT_EYE_GEO = new THREE.BoxGeometry(0.35, 0.12, 0.04);
+const GRUNT_SHOULDER_GEO = new THREE.SphereGeometry(0.24, 10, 10);
+const GRUNT_ARM_GEO = new THREE.BoxGeometry(0.28, 0.85, 0.28);
+const GRUNT_GUN_GEO = new THREE.BoxGeometry(0.34, 0.34, 1.05);
+const GRUNT_GUN_MUZZLE_GEO = new THREE.CylinderGeometry(0.12, 0.12, 0.25, 8);
+const GRUNT_LEG_GEO = new THREE.BoxGeometry(0.32, 0.7, 0.32);
+
+// Turret: squat ground emplacement — wide base ring, central column, rotating
+// top with a cluster of three barrels.
+const TURRET_BASE_GEO = new THREE.CylinderGeometry(1.2, 1.35, 0.35, 16);
+const TURRET_COLLAR_GEO = new THREE.CylinderGeometry(0.7, 0.85, 0.25, 16);
+const TURRET_DOME_GEO = new THREE.SphereGeometry(0.7, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2);
+const TURRET_BARREL_GEO = new THREE.CylinderGeometry(0.13, 0.13, 1.1, 8);
+const TURRET_EYE_GEO = new THREE.SphereGeometry(0.22, 10, 10);
+
+// Sniper: tall thin frame — vertical body, glowing scope sphere up top, one
+// long barrel, three short hover-fins beneath for silhouette.
+const SNIPER_BODY_GEO = new THREE.CylinderGeometry(0.32, 0.42, 1.6, 10);
+const SNIPER_NECK_GEO = new THREE.CylinderGeometry(0.18, 0.22, 0.35, 8);
+const SNIPER_SCOPE_GEO = new THREE.SphereGeometry(0.34, 14, 14);
+const SNIPER_BARREL_GEO = new THREE.CylinderGeometry(0.11, 0.11, 2.0, 10);
+const SNIPER_BARREL_TIP_GEO = new THREE.CylinderGeometry(0.18, 0.13, 0.22, 8);
+const SNIPER_FIN_GEO = new THREE.BoxGeometry(0.18, 0.08, 0.55);
+
+// Muzzle-flash plates: cheap billboard quads scaled up on the fire frame.
+const MUZZLE_FLASH_GEO = new THREE.SphereGeometry(0.35, 10, 10);
+
+// Per-kind debris pools: each entry mirrors a visible piece of the model.
+DEBRIS_GEOS_BY_KIND = {
+  scout: [SCOUT_BODY_GEO, SCOUT_ROTOR_BLADE_GEO, SCOUT_ANTENNA_GEO],
+  grunt: [GRUNT_TORSO_GEO, GRUNT_ARM_GEO, GRUNT_GUN_GEO],
+  turret: [TURRET_BARREL_GEO, TURRET_COLLAR_GEO, TURRET_DOME_GEO],
+  sniper: [SNIPER_BARREL_GEO, SNIPER_SCOPE_GEO, SNIPER_FIN_GEO],
+};
+// Raw geometry half-extents (max axis). Multiplied by DEBRIS_DISPLAY_SCALE
+// at render and collision time to keep visible chunks small and preserve
+// the prior ~0.6 contact envelope so debris hits don't get more punishing.
+DEBRIS_RADII_BY_KIND = {
+  scout: [0.55, 0.6, 0.4],
+  grunt: [0.7, 0.5, 0.6],
+  turret: [0.6, 0.85, 0.7],
+  sniper: [1.0, 0.4, 0.35],
+};
+const DEBRIS_DISPLAY_SCALE = 0.6;
 
 const ROBOT_HULL_MAT = new THREE.MeshStandardMaterial({
   color: "#7a8392", emissive: "#0a1018", emissiveIntensity: 0.4,
@@ -278,7 +324,7 @@ function spawnDebris(refs: SharedRefs, pos: THREE.Vector3, kind: RobotKind) {
   d.maxLife = 1.4 + Math.random() * 0.7;
   d.life = d.maxLife;
   d.kind = kind;
-  d.geoIdx = Math.floor(Math.random() * DEBRIS_GEOS.length);
+  d.geoIdx = Math.floor(Math.random() * DEBRIS_GEOS_BY_KIND[kind].length);
 
   const ox = (Math.random() * 2 - 1) * 0.4;
   const oy = (Math.random() * 2 - 1) * 0.4;
@@ -622,12 +668,53 @@ const HULL_EMISSIVE_FLASH = 3.2;
 const RING_EMISSIVE_BASE = 2.2;
 const RING_EMISSIVE_FLASH = 6.0;
 
+// Per-robot animation refs. Each archetype populates the subset it uses; the
+// shared useFrame loop dispatches on `r.kind` and animates the relevant parts.
+type AnimRefs = {
+  hull: THREE.MeshStandardMaterial | null;
+  ring: THREE.MeshStandardMaterial | null;
+  eye: THREE.MeshBasicMaterial | null;
+  // Scout
+  body: THREE.Object3D | null;
+  rotor1: THREE.Object3D | null;
+  rotor2: THREE.Object3D | null;
+  antenna1: THREE.Object3D | null;
+  antenna2: THREE.Object3D | null;
+  // Grunt
+  torso: THREE.Object3D | null;
+  gunArm: THREE.Object3D | null;
+  armL: THREE.Object3D | null;
+  // Turret
+  turretHead: THREE.Object3D | null;
+  // Sniper
+  sniperBarrel: THREE.Object3D | null;
+  scope: THREE.MeshBasicMaterial | null;
+  // Muzzle flash + recoil pivot used by all archetypes that have a barrel.
+  muzzle: THREE.Object3D | null;
+  muzzleMat: THREE.MeshBasicMaterial | null;
+};
+
+function makeAnimRefs(): AnimRefs {
+  return {
+    hull: null, ring: null, eye: null,
+    body: null, rotor1: null, rotor2: null, antenna1: null, antenna2: null,
+    torso: null, gunArm: null, armL: null,
+    turretHead: null,
+    sniperBarrel: null, scope: null,
+    muzzle: null, muzzleMat: null,
+  };
+}
+
+// Aim helper: orients the object so its local -Z faces the world-space target.
+// Delegates to three.js's Object3D.lookAt so parent rotations are accounted
+// for correctly (e.g. the sniper's barrel sits under a rotating body).
+function aimAt(obj: THREE.Object3D, target: THREE.Vector3) {
+  obj.lookAt(target);
+}
+
 function RobotPool({ refs }: { refs: SharedRefs }) {
   const groupRefs = useRef<(THREE.Group | null)[]>([]);
-  const ringRefs = useRef<(THREE.Mesh | null)[]>([]);
-  const eyeMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
-  const hullMatRefs = useRef<(THREE.MeshStandardMaterial | null)[]>([]);
-  const ringMatRefs = useRef<(THREE.MeshStandardMaterial | null)[]>([]);
+  const animRefs = useRef<AnimRefs[]>([]);
 
   // Per-kind material caches so tint matches archetype. Halo is shared per
   // kind; hull and ring are cloned per robot so individual hits can flash
@@ -635,6 +722,7 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
   type KindMatEntry = {
     halo: THREE.MeshBasicMaterial;
     eyeRGB: [number, number, number];
+    belt: THREE.MeshStandardMaterial;
   };
   const kindMats = useMemo<Record<RobotKind, KindMatEntry>>(() => {
     const entries = (Object.keys(ROBOT_ARCHETYPES) as RobotKind[]).map((k): [RobotKind, KindMatEntry] => {
@@ -642,7 +730,8 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
       const halo = ROBOT_HALO_MAT.clone();
       halo.color.set(a.haloColor);
       const c = new THREE.Color(a.ringColor);
-      return [k, { halo, eyeRGB: [c.r, c.g, c.b] }];
+      const belt = ROBOT_BELT_MAT.clone();
+      return [k, { halo, eyeRGB: [c.r, c.g, c.b], belt }];
     });
     return Object.fromEntries(entries) as Record<RobotKind, KindMatEntry>;
   }, []);
@@ -659,6 +748,11 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
     });
   }, [refs.robots]);
 
+  // Initialize anim ref slots for each robot.
+  if (animRefs.current.length !== refs.robots.length) {
+    animRefs.current = refs.robots.map(() => makeAnimRefs());
+  }
+
   useFrame((state, dt) => {
     if (refs.paused.current) return;
     const t = state.clock.elapsedTime;
@@ -674,37 +768,130 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
       }
       g.visible = true;
       const tt = t + r.bobPhase;
-      g.position.copy(r.pos);
-      g.position.y += Math.sin(tt * 1.2) * 0.5;
-      g.rotation.y = tt * 0.6;
-      const ring = ringRefs.current[i];
-      if (ring) {
-        ring.rotation.x = tt * 1.4;
-        ring.rotation.z = tt * 0.9;
-      }
-      const m = eyeMatRefs.current[i];
-      if (m) {
-        const pulse = 0.7 + Math.sin(tt * 6) * 0.3;
-        const rgb = kindMats[r.kind].eyeRGB;
-        m.color.setRGB(rgb[0] * pulse, rgb[1] * pulse, rgb[2] * pulse);
-      }
-      // Hit flash: decay timer and modulate hull/ring emissive intensity
-      // plus a tiny scale punch so each hit feels solid.
+      const a = ROBOT_ARCHETYPES[r.kind];
+      const ar = animRefs.current[i]!;
+
+      // Hit-flash decay (shared across kinds).
       if (r.hitFlash > 0) {
         r.hitFlash -= d;
         if (r.hitFlash < 0) r.hitFlash = 0;
       }
       const flash = r.hitFlash > 0 ? r.hitFlash / HIT_FLASH_DURATION : 0;
-      const hullMat = hullMatRefs.current[i];
-      if (hullMat) {
-        hullMat.emissiveIntensity = HULL_EMISSIVE_BASE + (HULL_EMISSIVE_FLASH - HULL_EMISSIVE_BASE) * flash;
+      if (ar.hull) ar.hull.emissiveIntensity = HULL_EMISSIVE_BASE + (HULL_EMISSIVE_FLASH - HULL_EMISSIVE_BASE) * flash;
+      if (ar.ring) ar.ring.emissiveIntensity = RING_EMISSIVE_BASE + (RING_EMISSIVE_FLASH - RING_EMISSIVE_BASE) * flash;
+
+      // Eye pulse (shared).
+      if (ar.eye) {
+        const pulse = 0.7 + Math.sin(tt * 6) * 0.3;
+        const rgb = kindMats[r.kind].eyeRGB;
+        ar.eye.color.setRGB(rgb[0] * pulse, rgb[1] * pulse, rgb[2] * pulse);
       }
-      const ringMat = ringMatRefs.current[i];
-      if (ringMat) {
-        ringMat.emissiveIntensity = RING_EMISSIVE_BASE + (RING_EMISSIVE_FLASH - RING_EMISSIVE_BASE) * flash;
+
+      // Muzzle-flash decay + plate intensity.
+      if (r.muzzleFlash > 0) {
+        r.muzzleFlash -= d;
+        if (r.muzzleFlash < 0) r.muzzleFlash = 0;
       }
+      const fireU = r.muzzleFlash > 0 ? Math.min(1, r.muzzleFlash / 0.12) : 0;
+      if (ar.muzzle) {
+        ar.muzzle.visible = fireU > 0;
+        const s = 0.6 + fireU * 1.4;
+        ar.muzzle.scale.setScalar(s);
+      }
+      if (ar.muzzleMat) ar.muzzleMat.opacity = fireU;
+
+      // Position + base scale (with hit punch).
       const punch = 1 + flash * 0.12;
-      g.scale.setScalar(ROBOT_ARCHETYPES[r.kind].scale * punch);
+      g.scale.setScalar(a.scale * punch);
+      g.position.copy(r.pos);
+
+      // Per-archetype animation. Root has no rotation; sub-parts animate.
+      g.rotation.set(0, 0, 0);
+
+      switch (r.kind) {
+        case "scout": {
+          // Fast bob + body wobble. Rotors spin hard. Antennae sway.
+          g.position.y += Math.sin(tt * 3.4) * 0.45;
+          if (ar.body) {
+            ar.body.rotation.y = Math.sin(tt * 2.1) * 0.6 + tt * 1.6;
+            ar.body.rotation.x = Math.sin(tt * 1.7) * 0.15;
+          }
+          if (ar.rotor1) ar.rotor1.rotation.y = tt * 28;
+          if (ar.rotor2) ar.rotor2.rotation.y = -tt * 28;
+          if (ar.antenna1) ar.antenna1.rotation.z = Math.sin(tt * 4) * 0.35;
+          if (ar.antenna2) ar.antenna2.rotation.z = -Math.sin(tt * 4 + 0.7) * 0.35;
+          // Eye/forward assembly tracks the player and recoils on fire.
+          if (ar.gunArm) {
+            if (r.hasSeenPlayer) {
+              aimAt(ar.gunArm, refs.shipPos);
+              ar.gunArm.position.z = -fireU * 0.12;
+            } else {
+              ar.gunArm.rotation.set(0, 0, 0);
+              ar.gunArm.position.z = 0;
+            }
+          }
+          break;
+        }
+        case "grunt": {
+          // Slow hover bob; torso sway; idle arm swing; gun arm tracks player.
+          g.position.y += Math.sin(tt * 1.1) * 0.25;
+          if (ar.torso) ar.torso.rotation.y = Math.sin(tt * 0.9) * 0.18;
+          if (ar.armL) ar.armL.rotation.x = Math.sin(tt * 1.4) * 0.25;
+          if (ar.gunArm) {
+            if (r.hasSeenPlayer) {
+              aimAt(ar.gunArm, refs.shipPos);
+              // Recoil along -Z (the barrel direction).
+              ar.gunArm.position.z = -fireU * 0.18;
+            } else {
+              ar.gunArm.rotation.set(0.2 + Math.sin(tt * 1.4) * 0.08, 0, 0);
+              ar.gunArm.position.z = 0;
+            }
+          }
+          break;
+        }
+        case "turret": {
+          // Anchored low; subtle bob; top head rotates. When tracking, head
+          // pitches/yaws toward player; idle drift otherwise.
+          g.position.y += Math.sin(tt * 1.6) * 0.12 - 0.3;
+          if (ar.turretHead) {
+            if (r.hasSeenPlayer) {
+              aimAt(ar.turretHead, refs.shipPos);
+              // Recoil: dip head briefly downward via small pitch.
+              ar.turretHead.rotateX(fireU * 0.25);
+            } else {
+              ar.turretHead.rotation.set(0, tt * 0.6, 0);
+            }
+          }
+          break;
+        }
+        case "sniper": {
+          // Tall thin; gentle hover; barrel drifts when idle, locks on target
+          // when alerted. Scope material pulses brighter to telegraph aim.
+          g.position.y += Math.sin(tt * 0.9) * 0.4;
+          if (ar.body) ar.body.rotation.y = Math.sin(tt * 0.5) * 0.4;
+          if (ar.sniperBarrel) {
+            if (r.hasSeenPlayer) {
+              aimAt(ar.sniperBarrel, refs.shipPos);
+              ar.sniperBarrel.position.z = -fireU * 0.3;
+            } else {
+              ar.sniperBarrel.rotation.set(
+                Math.sin(tt * 0.7) * 0.18,
+                Math.sin(tt * 0.5) * 0.4,
+                0,
+              );
+              ar.sniperBarrel.position.z = 0;
+            }
+          }
+          if (ar.scope) {
+            const sPulse = r.hasSeenPlayer
+              ? 1.4 + Math.sin(tt * 8) * 0.5
+              : 0.7 + Math.sin(tt * 2.5) * 0.2;
+            const rgb = kindMats[r.kind].eyeRGB;
+            ar.scope.color.setRGB(rgb[0] * sPulse, rgb[1] * sPulse, rgb[2] * sPulse);
+          }
+          break;
+        }
+      }
     }
   });
 
@@ -714,33 +901,192 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
         const a = ROBOT_ARCHETYPES[r.kind];
         const mats = kindMats[r.kind];
         const rm = robotMats[i]!;
-        hullMatRefs.current[i] = rm.hull;
-        ringMatRefs.current[i] = rm.ring;
+        if (!animRefs.current[i]) animRefs.current[i] = makeAnimRefs();
+        const ar = animRefs.current[i]!;
+        ar.hull = rm.hull;
+        ar.ring = rm.ring;
         return (
           <group
             key={i}
             ref={(el) => { groupRefs.current[i] = el; }}
             scale={a.scale}
           >
-            <mesh geometry={ROBOT_HULL_GEO} material={rm.hull} />
-            <mesh geometry={ROBOT_BELT_GEO} material={ROBOT_BELT_MAT} rotation={[Math.PI / 2, 0, 0]} />
-            <mesh
-              geometry={ROBOT_RING_GEO}
-              material={rm.ring}
-              ref={(el) => { ringRefs.current[i] = el; }}
-            />
-            <mesh geometry={ROBOT_EYE_GEO}>
-              <meshBasicMaterial
-                color={a.ringColor}
-                toneMapped={false}
-                ref={(m) => { eyeMatRefs.current[i] = m; }}
-              />
-            </mesh>
             <mesh geometry={ROBOT_HALO_GEO} material={mats.halo} />
+            {r.kind === "scout" && <ScoutModel ar={ar} hull={rm.hull} belt={mats.belt} ringColor={a.ringColor} />}
+            {r.kind === "grunt" && <GruntModel ar={ar} hull={rm.hull} belt={mats.belt} ringMat={rm.ring} ringColor={a.ringColor} />}
+            {r.kind === "turret" && <TurretModel ar={ar} hull={rm.hull} belt={mats.belt} ringMat={rm.ring} ringColor={a.ringColor} />}
+            {r.kind === "sniper" && <SniperModel ar={ar} hull={rm.hull} belt={mats.belt} ringColor={a.ringColor} />}
           </group>
         );
       })}
     </>
+  );
+}
+
+// ---- Per-archetype 3D sub-models ----
+// Each model exposes its animated parts via the AnimRefs slot so the shared
+// RobotPool useFrame loop can drive idle + combat animation.
+
+type ModelProps = {
+  ar: AnimRefs;
+  hull: THREE.MeshStandardMaterial;
+  belt: THREE.MeshStandardMaterial;
+  ringColor: string;
+  ringMat?: THREE.MeshStandardMaterial;
+};
+
+function MuzzleFlash({ ar, color }: { ar: AnimRefs; color: string }) {
+  // Sits at the muzzle tip (-Z) of the gun group. Hidden until fired.
+  return (
+    <mesh
+      visible={false}
+      geometry={MUZZLE_FLASH_GEO}
+      position={[0, 0, -0.05]}
+      ref={(el) => { ar.muzzle = el; }}
+    >
+      <meshBasicMaterial
+        color={color}
+        transparent
+        opacity={0}
+        depthWrite={false}
+        toneMapped={false}
+        blending={THREE.AdditiveBlending}
+        ref={(m) => { ar.muzzleMat = m; }}
+      />
+    </mesh>
+  );
+}
+
+function ScoutModel({ ar, hull, belt, ringColor }: ModelProps) {
+  // Outer group is steady; inner `body` group spins/wobbles for idle anim.
+  // Sibling `gunArm` group tracks the player and hosts the muzzle flash so
+  // the firing pulse is independent of the body's idle spin.
+  return (
+    <group>
+      <group ref={(el) => { ar.body = el; }}>
+        <mesh geometry={SCOUT_BODY_GEO} material={hull} />
+        {/* Cross-arm holding two rotors */}
+        <mesh geometry={SCOUT_ARM_GEO} material={belt} />
+        {/* Left rotor */}
+        <group position={[-0.65, 0.18, 0]} ref={(el) => { ar.rotor1 = el; }}>
+          <mesh geometry={SCOUT_ROTOR_HUB_GEO} material={belt} />
+          <mesh geometry={SCOUT_ROTOR_BLADE_GEO} material={belt} position={[0, 0.12, 0]} />
+          <mesh geometry={SCOUT_ROTOR_BLADE_GEO} material={belt} position={[0, 0.12, 0]} rotation={[0, Math.PI / 2, 0]} />
+        </group>
+        {/* Right rotor */}
+        <group position={[0.65, 0.18, 0]} ref={(el) => { ar.rotor2 = el; }}>
+          <mesh geometry={SCOUT_ROTOR_HUB_GEO} material={belt} />
+          <mesh geometry={SCOUT_ROTOR_BLADE_GEO} material={belt} position={[0, 0.12, 0]} />
+          <mesh geometry={SCOUT_ROTOR_BLADE_GEO} material={belt} position={[0, 0.12, 0]} rotation={[0, Math.PI / 2, 0]} />
+        </group>
+        {/* Antennae */}
+        <group position={[-0.2, 0.4, -0.1]} ref={(el) => { ar.antenna1 = el; }}>
+          <mesh geometry={SCOUT_ANTENNA_GEO} material={belt} position={[0, 0.35, 0]} />
+          <mesh geometry={SCOUT_ANTENNA_TIP_GEO} position={[0, 0.7, 0]}>
+            <meshBasicMaterial color={ringColor} toneMapped={false} />
+          </mesh>
+        </group>
+        <group position={[0.2, 0.4, -0.1]} ref={(el) => { ar.antenna2 = el; }}>
+          <mesh geometry={SCOUT_ANTENNA_GEO} material={belt} position={[0, 0.35, 0]} />
+          <mesh geometry={SCOUT_ANTENNA_TIP_GEO} position={[0, 0.7, 0]}>
+            <meshBasicMaterial color={ringColor} toneMapped={false} />
+          </mesh>
+        </group>
+      </group>
+      {/* Forward-facing eye stays steady on the gunArm so it points at the
+          target along with the muzzle, reading as an aim sensor. */}
+      <group ref={(el) => { ar.gunArm = el; }}>
+        <mesh geometry={SCOUT_EYE_GEO} position={[0, 0, -0.55]}>
+          <meshBasicMaterial color={ringColor} toneMapped={false} ref={(m) => { ar.eye = m; }} />
+        </mesh>
+        <MuzzleFlash ar={ar} color={ringColor} />
+      </group>
+    </group>
+  );
+}
+
+function GruntModel({ ar, hull, belt, ringMat, ringColor }: ModelProps) {
+  return (
+    <group ref={(el) => { ar.torso = el; }}>
+      {/* Torso */}
+      <mesh geometry={GRUNT_TORSO_GEO} material={hull} position={[0, 0.2, 0]} />
+      {/* Head */}
+      <mesh geometry={GRUNT_HEAD_GEO} material={hull} position={[0, 0.9, 0]} />
+      {/* Eye visor on front of head */}
+      <mesh geometry={GRUNT_EYE_GEO} position={[0, 0.92, -0.3]}>
+        <meshBasicMaterial color={ringColor} toneMapped={false} ref={(m) => { ar.eye = m; }} />
+      </mesh>
+      {/* Left arm (idle swing) */}
+      <group position={[-0.7, 0.6, 0]} ref={(el) => { ar.armL = el; }}>
+        <mesh geometry={GRUNT_SHOULDER_GEO} material={belt} />
+        <mesh geometry={GRUNT_ARM_GEO} material={hull} position={[0, -0.5, 0]} />
+      </group>
+      {/* Right shoulder pivot — purely visual, fixed */}
+      <mesh geometry={GRUNT_SHOULDER_GEO} material={belt} position={[0.7, 0.6, 0]} />
+      {/* Gun arm: pivots around right shoulder, aims at target */}
+      <group position={[0.7, 0.6, 0]} ref={(el) => { ar.gunArm = el; }}>
+        <mesh geometry={GRUNT_ARM_GEO} material={hull} position={[0, -0.3, -0.3]} rotation={[Math.PI / 2.5, 0, 0]} />
+        <mesh geometry={GRUNT_GUN_GEO} material={belt} position={[0, -0.05, -0.7]} />
+        <mesh geometry={GRUNT_GUN_MUZZLE_GEO} material={ringMat ?? hull} position={[0, -0.05, -1.25]} rotation={[Math.PI / 2, 0, 0]} />
+        <MuzzleFlash ar={ar} color={ringColor} />
+      </group>
+      {/* Legs (stub) */}
+      <mesh geometry={GRUNT_LEG_GEO} material={hull} position={[-0.3, -0.55, 0]} />
+      <mesh geometry={GRUNT_LEG_GEO} material={hull} position={[0.3, -0.55, 0]} />
+    </group>
+  );
+}
+
+function TurretModel({ ar, hull, belt, ringMat, ringColor }: ModelProps) {
+  return (
+    <group>
+      {/* Base */}
+      <mesh geometry={TURRET_BASE_GEO} material={belt} position={[0, -0.85, 0]} />
+      {/* Collar between base and head */}
+      <mesh geometry={TURRET_COLLAR_GEO} material={hull} position={[0, -0.55, 0]} />
+      {/* Rotating turret head with barrel cluster + dome */}
+      <group position={[0, -0.3, 0]} ref={(el) => { ar.turretHead = el; }}>
+        <mesh geometry={TURRET_DOME_GEO} material={hull} position={[0, 0, 0]} />
+        {/* Three barrels in a triangle */}
+        <mesh geometry={TURRET_BARREL_GEO} material={belt} position={[0.15, 0.1, -0.55]} rotation={[Math.PI / 2, 0, 0]} />
+        <mesh geometry={TURRET_BARREL_GEO} material={belt} position={[-0.15, 0.1, -0.55]} rotation={[Math.PI / 2, 0, 0]} />
+        <mesh geometry={TURRET_BARREL_GEO} material={belt} position={[0, -0.1, -0.55]} rotation={[Math.PI / 2, 0, 0]} />
+        {/* Eye on the front of the dome */}
+        <mesh geometry={TURRET_EYE_GEO} position={[0, 0.2, -0.55]}>
+          <meshBasicMaterial color={ringColor} toneMapped={false} ref={(m) => { ar.eye = m; }} />
+        </mesh>
+        {/* Ring band around the head */}
+        <mesh material={ringMat ?? hull} position={[0, 0.05, 0]} rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.78, 0.04, 6, 24]} />
+        </mesh>
+        <MuzzleFlash ar={ar} color={ringColor} />
+      </group>
+    </group>
+  );
+}
+
+function SniperModel({ ar, hull, belt, ringColor }: ModelProps) {
+  return (
+    <group ref={(el) => { ar.body = el; }}>
+      {/* Tall body */}
+      <mesh geometry={SNIPER_BODY_GEO} material={hull} position={[0, 0.1, 0]} />
+      {/* Neck */}
+      <mesh geometry={SNIPER_NECK_GEO} material={belt} position={[0, 0.95, 0]} />
+      {/* Glowing scope sphere up top */}
+      <mesh geometry={SNIPER_SCOPE_GEO} position={[0, 1.25, 0]}>
+        <meshBasicMaterial color={ringColor} toneMapped={false} ref={(m) => { ar.scope = m; ar.eye = m; }} />
+      </mesh>
+      {/* Single long barrel, mounted in front of body — aims at target */}
+      <group position={[0, 0.3, -0.4]} ref={(el) => { ar.sniperBarrel = el; }}>
+        <mesh geometry={SNIPER_BARREL_GEO} material={belt} position={[0, 0, -1.0]} rotation={[Math.PI / 2, 0, 0]} />
+        <mesh geometry={SNIPER_BARREL_TIP_GEO} material={belt} position={[0, 0, -2.05]} rotation={[Math.PI / 2, 0, 0]} />
+        <MuzzleFlash ar={ar} color={ringColor} />
+      </group>
+      {/* Three hover fins arrayed around the base */}
+      <mesh geometry={SNIPER_FIN_GEO} material={belt} position={[0, -0.7, 0.4]} />
+      <mesh geometry={SNIPER_FIN_GEO} material={belt} position={[-0.4, -0.7, -0.2]} rotation={[0, Math.PI / 3, 0]} />
+      <mesh geometry={SNIPER_FIN_GEO} material={belt} position={[0.4, -0.7, -0.2]} rotation={[0, -Math.PI / 3, 0]} />
+    </group>
   );
 }
 
@@ -880,16 +1226,15 @@ function DebrisPool({ refs }: { refs: SharedRefs }) {
       m.quaternion.copy(d.quat);
 
       // Pick the geometry/material for this piece (cheap if unchanged).
-      const geo = DEBRIS_GEOS[d.geoIdx]!;
+      const geo = DEBRIS_GEOS_BY_KIND[d.kind][d.geoIdx]!;
       if (m.geometry !== geo) m.geometry = geo;
       const mat = DEBRIS_HULL_MATS[d.kind];
       if (m.material !== mat) m.material = mat;
 
-      // Shrink near end of life so it fades out. Combine with the per-geo
-      // display scale so reused robot sub-geometries appear as chunks.
+      // Shrink near end of life so it fades out.
       const u = d.life / d.maxLife;
       const fade = u < 0.3 ? Math.max(0, u / 0.3) : 1;
-      m.scale.setScalar(DEBRIS_DISPLAY_SCALES[d.geoIdx]! * fade);
+      m.scale.setScalar(fade * DEBRIS_DISPLAY_SCALE);
       m.visible = true;
     }
   });
@@ -904,7 +1249,7 @@ function DebrisPool({ refs }: { refs: SharedRefs }) {
         <mesh
           key={i}
           visible={false}
-          geometry={DEBRIS_GEOS[0]}
+          geometry={DEBRIS_GEOS_BY_KIND.grunt[0]}
           material={DEBRIS_HULL_MATS.grunt}
           ref={(el) => { meshRefs.current[i] = el; }}
         />
@@ -986,7 +1331,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       const dx = dp.pos.x - refs.shipPos.x;
       const dy = dp.pos.y - refs.shipPos.y;
       const dz = dp.pos.z - refs.shipPos.z;
-      const reach = (DEBRIS_RADII[dp.geoIdx] ?? 0.6) + SHIP_HIT_R;
+      const reach = (DEBRIS_RADII_BY_KIND[dp.kind][dp.geoIdx] ?? 0.6) * DEBRIS_DISPLAY_SCALE + SHIP_HIT_R;
       const dsq = dx * dx + dy * dy + dz * dz;
       if (dsq < reach * reach) {
         const dist = Math.sqrt(Math.max(dsq, 1e-6));
@@ -1305,6 +1650,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
               _vu.normalize();
               _vt.copy(r.pos).addScaledVector(_vu, 1.5);
               spawnLaser(refs, _vt, _vu, true, arch.laserSpeed, arch.damage);
+              r.muzzleFlash = 0.12;
             }
           } else {
             r.fireCooldown = 0.5;
@@ -1452,6 +1798,7 @@ function GameInner() {
         strafeTimer: Math.random() * 0.5,
         hitFlash: 0,
         hasSeenPlayer: false,
+        muzzleFlash: 0,
       };
     });
     const lasers: Laser[] = [];
@@ -1646,6 +1993,8 @@ function GameInner() {
       r.cellOffset.set(0, 0, 0);
       r.strafeTimer = Math.random() * 0.5;
       r.hasSeenPlayer = false;
+      r.hitFlash = 0;
+      r.muzzleFlash = 0;
     });
     (level as any).reactorHp = 200;
   };
