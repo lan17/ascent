@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import { CELL, HALF, type Level } from "./level";
+import { CELL, HALF, type Level, type Room } from "./level";
 import type { Robot } from "./gameStore";
 
 type Props = {
@@ -12,60 +12,70 @@ type Props = {
   onClose: () => void;
 };
 
-// Build clean wireframe geometry: one box outline per room + polyline per corridor.
-// This avoids drawing every cell face, which produced overlapping line clutter.
-function buildMapGeometry(level: Level) {
-  const positions: number[] = [];
-  const colors: number[] = [];
+const KIND_COLOR: Record<Room["kind"], string> = {
+  hub: "#ff8a3a",
+  shaft: "#7a55ff",
+  reactor: "#ff3344",
+};
+const KIND_LABEL: Record<Room["kind"], string> = {
+  hub: "HUB",
+  shaft: "SHAFT",
+  reactor: "REACTOR",
+};
+const CORRIDOR_COLOR = "#3a8acc";
 
-  const KIND_COLOR: Record<string, THREE.Color> = {
-    hub:     new THREE.Color("#ff8a3a"),
-    shaft:   new THREE.Color("#7a55ff"),
-    reactor: new THREE.Color("#ff3344"),
-  };
-  const CORRIDOR_COLOR = new THREE.Color("#3a8acc");
+type RoomGeo = {
+  room: Room;
+  center: THREE.Vector3;
+  size: THREE.Vector3;
+  color: THREE.Color;
+};
 
-  // Each room → 12 edges of its bounding box.
-  const boxEdges: Array<[number, number]> = [
-    [0, 1], [1, 2], [2, 3], [3, 0],
-    [4, 5], [5, 6], [6, 7], [7, 4],
-    [0, 4], [1, 5], [2, 6], [3, 7],
-  ];
-  for (const r of level.rooms) {
-    const col = KIND_COLOR[r.kind] ?? KIND_COLOR.hub!;
+function buildRoomGeos(level: Level): RoomGeo[] {
+  return level.rooms.map((r) => {
     const minX = r.min[0] * CELL - HALF, maxX = r.max[0] * CELL + HALF;
     const minY = r.min[1] * CELL - HALF, maxY = r.max[1] * CELL + HALF;
     const minZ = r.min[2] * CELL - HALF, maxZ = r.max[2] * CELL + HALF;
-    const corners: Array<[number, number, number]> = [
-      [minX, minY, minZ], [maxX, minY, minZ],
-      [maxX, minY, maxZ], [minX, minY, maxZ],
-      [minX, maxY, minZ], [maxX, maxY, minZ],
-      [maxX, maxY, maxZ], [minX, maxY, maxZ],
-    ];
-    for (const [a, b] of boxEdges) {
-      const A = corners[a]!, B = corners[b]!;
-      positions.push(A[0], A[1], A[2], B[0], B[1], B[2]);
-      colors.push(col.r, col.g, col.b, col.r, col.g, col.b);
-    }
-  }
+    return {
+      room: r,
+      center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
+      size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
+      color: new THREE.Color(KIND_COLOR[r.kind]),
+    };
+  });
+}
 
-  // Each corridor → polyline through its cell centers.
+type CorridorSeg = {
+  center: THREE.Vector3;
+  size: THREE.Vector3;
+};
+
+// Build short box segments along each corridor path so corridors read as
+// fat tubes between rooms instead of single thin lines.
+function buildCorridorSegs(level: Level): CorridorSeg[] {
+  const segs: CorridorSeg[] = [];
+  const W = CELL * 0.55; // fat tube cross-section
   for (const cor of level.corridors) {
     const path = cor.path;
     for (let i = 0; i < path.length - 1; i++) {
-      const a = path[i]!, b = path[i + 1]!;
-      positions.push(a[0] * CELL, a[1] * CELL, a[2] * CELL,
-                     b[0] * CELL, b[1] * CELL, b[2] * CELL);
-      colors.push(CORRIDOR_COLOR.r, CORRIDOR_COLOR.g, CORRIDOR_COLOR.b,
-                  CORRIDOR_COLOR.r, CORRIDOR_COLOR.g, CORRIDOR_COLOR.b);
+      const a = path[i]!;
+      const b = path[i + 1]!;
+      const ax = a[0] * CELL, ay = a[1] * CELL, az = a[2] * CELL;
+      const bx = b[0] * CELL, by = b[1] * CELL, bz = b[2] * CELL;
+      const cx = (ax + bx) / 2, cy = (ay + by) / 2, cz = (az + bz) / 2;
+      const dx = Math.abs(bx - ax), dy = Math.abs(by - ay), dz = Math.abs(bz - az);
+      // Extend by W on the running axis so adjacent segments overlap and read as a tube.
+      segs.push({
+        center: new THREE.Vector3(cx, cy, cz),
+        size: new THREE.Vector3(
+          dx > 0 ? dx + W : W,
+          dy > 0 ? dy + W : W,
+          dz > 0 ? dz + W : W,
+        ),
+      });
     }
   }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-  geo.computeBoundingSphere();
-  return geo;
+  return segs;
 }
 
 // Bounds across all rooms + corridor cells, used to frame the map camera.
@@ -84,10 +94,27 @@ function levelBounds(level: Level) {
   box.getCenter(center);
   const size = new THREE.Vector3();
   box.getSize(size);
-  return { center, radius: Math.max(40, size.length() / 2) };
+  return { center, size, radius: Math.max(40, size.length() / 2) };
 }
 
-function MapScene({ level, shipPos, shipQuat, robots, yaw, pitch, zoom }: {
+// Find which room (if any) currently contains the ship.
+function findCurrentRoom(level: Level, shipPos: THREE.Vector3): Room | null {
+  const cx = Math.round(shipPos.x / CELL);
+  const cy = Math.round(shipPos.y / CELL);
+  const cz = Math.round(shipPos.z / CELL);
+  for (const r of level.rooms) {
+    if (cx >= r.min[0] && cx <= r.max[0] &&
+        cy >= r.min[1] && cy <= r.max[1] &&
+        cz >= r.min[2] && cz <= r.max[2]) {
+      return r;
+    }
+  }
+  return null;
+}
+
+function MapScene({
+  level, shipPos, shipQuat, robots, yaw, pitch, zoom, floorY,
+}: {
   level: Level;
   shipPos: THREE.Vector3;
   shipQuat: THREE.Quaternion;
@@ -95,18 +122,21 @@ function MapScene({ level, shipPos, shipQuat, robots, yaw, pitch, zoom }: {
   yaw: number;
   pitch: number;
   zoom: number;
+  floorY: number;
 }) {
-  const geo = useMemo(() => buildMapGeometry(level), [level]);
-  useEffect(() => () => geo.dispose(), [geo]);
+  const roomGeos = useMemo(() => buildRoomGeos(level), [level]);
+  const corridorSegs = useMemo(() => buildCorridorSegs(level), [level]);
   const bounds = useMemo(() => levelBounds(level), [level]);
   const { camera } = useThree();
 
   const shipMarker = useRef<THREE.Group>(null);
+  const haloRef = useRef<THREE.Mesh>(null);
+  const dropRef = useRef<THREE.Mesh>(null);
   const robotGroup = useRef<THREE.Group>(null);
 
-  useFrame(() => {
-    // Orbit camera around level center
-    const dist = bounds.radius * 1.6 * zoom;
+  useFrame((state) => {
+    // Orbit camera around level center. dist scales with bounds size + zoom.
+    const dist = bounds.radius * 2.0 * zoom;
     const cy = Math.cos(pitch);
     const sy = Math.sin(pitch);
     const cx = Math.cos(yaw);
@@ -118,13 +148,27 @@ function MapScene({ level, shipPos, shipQuat, robots, yaw, pitch, zoom }: {
     );
     camera.lookAt(bounds.center);
 
-    // Update ship marker
     if (shipMarker.current) {
       shipMarker.current.position.copy(shipPos);
       shipMarker.current.quaternion.copy(shipQuat);
     }
 
-    // Update robot dots
+    // Pulsing halo around ship for visibility at any zoom.
+    if (haloRef.current) {
+      const t = state.clock.elapsedTime;
+      const s = 1 + Math.sin(t * 4) * 0.25;
+      haloRef.current.scale.set(s, s, s);
+      const mat = haloRef.current.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.45 + Math.sin(t * 4) * 0.2;
+    }
+
+    // Vertical drop-line from ship down to the floor plane: scale a thin box.
+    if (dropRef.current) {
+      const dropLen = Math.max(0.1, shipPos.y - floorY);
+      dropRef.current.position.set(shipPos.x, (shipPos.y + floorY) / 2, shipPos.z);
+      dropRef.current.scale.set(1, dropLen, 1);
+    }
+
     if (robotGroup.current) {
       const children = robotGroup.current.children;
       for (let i = 0; i < robots.length; i++) {
@@ -137,29 +181,66 @@ function MapScene({ level, shipPos, shipQuat, robots, yaw, pitch, zoom }: {
     }
   });
 
+  // Reference grid placed at the bottom of the level bounds.
+  const gridSize = Math.max(bounds.size.x, bounds.size.z) * 1.6;
+  const gridDivisions = Math.max(8, Math.round(gridSize / CELL));
+
   return (
     <>
-      <ambientLight intensity={0.8} />
-      <lineSegments geometry={geo}>
-        <lineBasicMaterial vertexColors transparent opacity={0.85} toneMapped={false} />
-      </lineSegments>
+      <ambientLight intensity={0.9} />
+      <directionalLight position={[80, 120, 80]} intensity={0.7} />
 
-      {/* Reactor marker — pulsing red sphere */}
+      {/* Reference grid at floor level */}
+      <gridHelper
+        args={[gridSize, gridDivisions, "#1d4d70", "#0e2a40"]}
+        position={[bounds.center.x, floorY, bounds.center.z]}
+      />
+
+      {/* Filled, semi-transparent room volumes — kind-colored */}
+      {roomGeos.map((g, i) => (
+        <group key={`room-${i}`} position={g.center}>
+          {/* Floor footprint — opaque slab so vertical relationships read clearly */}
+          <mesh position={[0, -g.size.y / 2 - 0.05, 0]}>
+            <boxGeometry args={[g.size.x * 0.96, 0.4, g.size.z * 0.96]} />
+            <meshBasicMaterial color={g.color} transparent opacity={0.55} toneMapped={false} />
+          </mesh>
+          {/* Volume — translucent box so the inside is visible */}
+          <mesh>
+            <boxGeometry args={[g.size.x, g.size.y, g.size.z]} />
+            <meshBasicMaterial
+              color={g.color}
+              transparent
+              opacity={0.18}
+              depthWrite={false}
+              toneMapped={false}
+            />
+          </mesh>
+          {/* Edges for crisp silhouette */}
+          <lineSegments>
+            <edgesGeometry args={[new THREE.BoxGeometry(g.size.x, g.size.y, g.size.z)]} />
+            <lineBasicMaterial color={g.color} transparent opacity={0.95} toneMapped={false} />
+          </lineSegments>
+        </group>
+      ))}
+
+      {/* Corridor tubes — short fat box segments */}
+      {corridorSegs.map((s, i) => (
+        <mesh key={`cor-${i}`} position={s.center}>
+          <boxGeometry args={[s.size.x, s.size.y, s.size.z]} />
+          <meshBasicMaterial
+            color={CORRIDOR_COLOR}
+            transparent
+            opacity={0.55}
+            depthWrite={false}
+            toneMapped={false}
+          />
+        </mesh>
+      ))}
+
+      {/* Reactor pulse marker */}
       <ReactorMarker pos={level.reactor} />
 
-      {/* Player ship — bright green arrow pointing forward (-Z) */}
-      <group ref={shipMarker}>
-        <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <coneGeometry args={[1.4, 3.2, 4]} />
-          <meshBasicMaterial color="#66ff88" toneMapped={false} />
-        </mesh>
-        <mesh>
-          <sphereGeometry args={[0.6, 8, 8]} />
-          <meshBasicMaterial color="#aaffbb" toneMapped={false} />
-        </mesh>
-      </group>
-
-      {/* Robot markers — small yellow squares */}
+      {/* Robot markers — small yellow boxes */}
       <group ref={robotGroup}>
         {robots.map((r) => (
           <mesh key={r.id}>
@@ -167,6 +248,38 @@ function MapScene({ level, shipPos, shipQuat, robots, yaw, pitch, zoom }: {
             <meshBasicMaterial color="#ffcc22" toneMapped={false} />
           </mesh>
         ))}
+      </group>
+
+      {/* Vertical drop-line from ship to floor — render before ship marker */}
+      <mesh ref={dropRef}>
+        <boxGeometry args={[0.25, 1, 0.25]} />
+        <meshBasicMaterial color="#66ff88" transparent opacity={0.55} toneMapped={false} />
+      </mesh>
+
+      {/* Player ship marker — large arrow + halo, drawn on top of everything */}
+      <group ref={shipMarker}>
+        {/* Pulsing halo ring */}
+        <mesh ref={haloRef} renderOrder={10}>
+          <ringGeometry args={[2.6, 3.4, 32]} />
+          <meshBasicMaterial
+            color="#aaffbb"
+            side={THREE.DoubleSide}
+            transparent
+            depthTest={false}
+            depthWrite={false}
+            toneMapped={false}
+          />
+        </mesh>
+        {/* Heading arrow — points along -Z (ship forward) */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, -0.5]} renderOrder={11}>
+          <coneGeometry args={[1.6, 4.5, 4]} />
+          <meshBasicMaterial color="#66ff88" depthTest={false} toneMapped={false} />
+        </mesh>
+        {/* Body sphere */}
+        <mesh renderOrder={11}>
+          <sphereGeometry args={[1.0, 12, 12]} />
+          <meshBasicMaterial color="#eaffea" depthTest={false} toneMapped={false} />
+        </mesh>
       </group>
     </>
   );
@@ -180,21 +293,39 @@ function ReactorMarker({ pos }: { pos: THREE.Vector3 }) {
     ref.current.scale.setScalar(1 + Math.sin(t * 4) * 0.25);
   });
   return (
-    <mesh ref={ref} position={pos}>
-      <sphereGeometry args={[2.2, 16, 16]} />
-      <meshBasicMaterial color="#ff3344" toneMapped={false} />
+    <mesh ref={ref} position={pos} renderOrder={9}>
+      <sphereGeometry args={[2.6, 16, 16]} />
+      <meshBasicMaterial color="#ff3344" depthTest={false} toneMapped={false} />
     </mesh>
   );
 }
 
 export function MapView({ level, shipPos, shipQuat, robots, onClose }: Props) {
-  const [yaw, setYaw] = useState(0.6);
-  const [pitch, setPitch] = useState(0.5);
+  // Default to a pleasing isometric-ish angle.
+  const [yaw, setYaw] = useState(Math.PI / 4);
+  const [pitch, setPitch] = useState(Math.PI / 5);
   const [zoom, setZoom] = useState(1);
   const dragging = useRef<{ x: number; y: number } | null>(null);
 
-  // Keep input handlers attached to the overlay div, not window, so the underlying
-  // game's pointer-lock state isn't disturbed.
+  // Floor plane Y for grid + drop-line: anchor to bottom of level bounds.
+  const bounds = useMemo(() => levelBounds(level), [level]);
+  const floorY = bounds.center.y - bounds.size.y / 2 - 1;
+
+  // Track current room name with a tiny re-render loop tied to the map being open.
+  const [roomLabel, setRoomLabel] = useState<string>("");
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      const r = findCurrentRoom(level, shipPos);
+      const next = r ? KIND_LABEL[r.kind] : "CORRIDOR";
+      setRoomLabel((prev) => (prev === next ? prev : next));
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [level, shipPos]);
+
   const onPointerDown = (e: React.PointerEvent) => {
     dragging.current = { x: e.clientX, y: e.clientY };
     (e.target as Element).setPointerCapture?.(e.pointerId);
@@ -216,7 +347,7 @@ export function MapView({ level, shipPos, shipQuat, robots, onClose }: Props) {
     setZoom((z) => Math.max(0.4, Math.min(3, z * (1 + e.deltaY * 0.001))));
   };
 
-  // Keyboard rotation while map is open
+  // Keyboard orbit while map is open.
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
       if (e.code === "KeyA" || e.code === "ArrowLeft") setYaw((y) => y - 0.1);
@@ -242,15 +373,20 @@ export function MapView({ level, shipPos, shipQuat, robots, onClose }: Props) {
         <div className="flex items-baseline gap-4">
           <h2 className="text-xl font-black tracking-[0.4em] text-cyan-300">AUTOMAP</h2>
           <span className="text-xs uppercase tracking-widest text-cyan-200/60">
-            Drag to orbit · Wheel to zoom · Tab to close
+            Game paused · Drag to orbit · Wheel to zoom · Tab to close
           </span>
         </div>
-        <button
-          onClick={onClose}
-          className="rounded border border-cyan-400/50 bg-cyan-500/10 px-4 py-1 text-xs font-bold uppercase tracking-widest text-cyan-200 hover:bg-cyan-500/30"
-        >
-          CLOSE
-        </button>
+        <div className="flex items-center gap-4">
+          <span className="rounded border border-cyan-400/40 bg-cyan-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.3em] text-cyan-200">
+            You are in: <span className="ml-1 text-cyan-50">{roomLabel || "—"}</span>
+          </span>
+          <button
+            onClick={onClose}
+            className="rounded border border-cyan-400/50 bg-cyan-500/10 px-4 py-1 text-xs font-bold uppercase tracking-widest text-cyan-200 hover:bg-cyan-500/30"
+          >
+            CLOSE
+          </button>
+        </div>
       </div>
       <div className="relative flex-1">
         <Canvas
@@ -266,12 +402,13 @@ export function MapView({ level, shipPos, shipQuat, robots, onClose }: Props) {
             yaw={yaw}
             pitch={pitch}
             zoom={zoom}
+            floorY={floorY}
           />
         </Canvas>
 
         {/* Legend */}
         <div className="pointer-events-none absolute bottom-4 left-4 rounded border border-cyan-400/30 bg-black/60 p-3 text-[11px] uppercase tracking-widest text-cyan-100/80">
-          <Legend swatch="#66ff88" label="Your ship" />
+          <Legend swatch="#66ff88" label="Your ship (arrow = facing)" />
           <Legend swatch="#ffcc22" label="Robots" />
           <Legend swatch="#ff3344" label="Reactor chamber" />
           <Legend swatch="#ff8a3a" label="Hub room" />

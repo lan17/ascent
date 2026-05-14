@@ -34,6 +34,7 @@ type SharedRefs = {
     locked: boolean;
     firing: boolean;
   };
+  paused: { current: boolean };
 };
 
 // ---------- Module-scope scratch (no per-frame allocation in hot paths) ----------
@@ -142,6 +143,7 @@ function ShipController({ refs }: { refs: SharedRefs }) {
 
   useFrame((_, dt) => {
     if (refs.hud.current.status !== "playing") return;
+    if (refs.paused.current) return;
     const d = Math.min(dt, 0.05);
 
     // --- Orientation ---
@@ -247,6 +249,7 @@ function LaserPool({ refs }: { refs: SharedRefs }) {
   const haloRefs = useRef<(THREE.Mesh | null)[]>([]);
 
   useFrame(() => {
+    if (refs.paused.current) return;
     const pool = refs.lasers;
     for (let i = 0; i < pool.length; i++) {
       const L = pool[i]!;
@@ -300,6 +303,7 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
   const eyeMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
 
   useFrame((state) => {
+    if (refs.paused.current) return;
     const t = state.clock.elapsedTime;
     const robots = refs.robots;
     for (let i = 0; i < robots.length; i++) {
@@ -362,6 +366,7 @@ function ExplosionPool({ refs }: { refs: SharedRefs }) {
   const { camera } = useThree();
 
   useFrame((state, dt) => {
+    if (refs.paused.current) return;
     const d = Math.min(dt, 0.05);
     const pool = refs.explosions;
     for (let i = 0; i < pool.length; i++) {
@@ -473,6 +478,7 @@ function ExplosionPool({ refs }: { refs: SharedRefs }) {
 function GameLoop({ refs }: { refs: SharedRefs }) {
   useFrame((_, dt) => {
     if (refs.hud.current.status !== "playing") return;
+    if (refs.paused.current) return;
     const d = Math.min(dt, 0.05);
 
     // Lasers — iterate fixed pool, no React render, no splice
@@ -724,6 +730,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
 function ShipBody({ refs }: { refs: SharedRefs }) {
   const ref = useRef<THREE.Group>(null);
   useFrame(() => {
+    if (refs.paused.current) return;
     if (!ref.current) return;
     _vu.set(0, 0, -1).applyQuaternion(refs.shipQuat);
     ref.current.position.copy(refs.shipPos).addScaledVector(_vu, 0.4);
@@ -767,6 +774,9 @@ function DustField() {
   });
   return <points ref={ref} geometry={geo} material={mat} />;
 }
+
+// Note: DustField follows the camera, which is itself frozen during pause
+// (ShipController early-returns), so dust positions naturally don't advance.
 
 function hasWebGL(): boolean {
   try {
@@ -815,6 +825,8 @@ function GameInner() {
   const [mapOpen, setMapOpen] = useState(false);
   const mapOpenRef = useRef(false);
   mapOpenRef.current = mapOpen;
+  const pausedRef = useRef(false);
+  pausedRef.current = mapOpen;
 
   const level = useMemo(() => generateLevel(Math.floor(Math.random() * 99999) + 1), []);
 
@@ -867,6 +879,7 @@ function GameInner() {
       hud: hudRef,
       keys: new Set<string>(),
       mouse: { dx: 0, dy: 0, aimX: 0, aimY: 0, locked: false, firing: false },
+      paused: pausedRef,
     };
   }, [level]);
 
@@ -874,21 +887,30 @@ function GameInner() {
     setHudState((s) => ({ ...s, enemiesLeft: refs.robots.length }));
   }, [refs]);
 
+  // Single source of truth for opening/closing the map. Always clears input
+  // state on both edges (open and close) so held keys / pending mouse delta
+  // don't leak across the pause boundary.
+  const setMapOpenWithReset = (next: boolean | ((prev: boolean) => boolean)) => {
+    setMapOpen((prev) => {
+      const nv = typeof next === "function" ? next(prev) : next;
+      refs.keys.clear();
+      refs.mouse.firing = false;
+      refs.mouse.dx = 0;
+      refs.mouse.dy = 0;
+      refs.mouse.aimX = 0;
+      refs.mouse.aimY = 0;
+      if (nv && document.pointerLockElement) document.exitPointerLock();
+      return nv;
+    });
+  };
+
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
       if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab"].includes(e.code)) {
         e.preventDefault();
       }
       if (e.code === "Tab" && hudRef.current.status === "playing") {
-        setMapOpen((m) => {
-          const next = !m;
-          if (next) {
-            refs.keys.clear();
-            refs.mouse.firing = false;
-            if (document.pointerLockElement) document.exitPointerLock();
-          }
-          return next;
-        });
+        setMapOpenWithReset((m) => !m);
         return;
       }
       if (mapOpenRef.current) return;
@@ -1039,7 +1061,7 @@ function GameInner() {
           shipPos={refs.shipPos}
           shipQuat={refs.shipQuat}
           robots={refs.robots}
-          onClose={() => setMapOpen(false)}
+          onClose={() => setMapOpenWithReset(false)}
         />
       )}
     </div>
@@ -1056,6 +1078,7 @@ function Headlight({ refs }: { refs: SharedRefs }) {
     return () => { scene.remove(targetRef.current); };
   }, [scene]);
   useFrame(() => {
+    if (refs.paused.current) return;
     if (!ref.current) return;
     ref.current.position.copy(refs.shipPos);
     _vu.set(0, 0, -1).applyQuaternion(refs.shipQuat);
