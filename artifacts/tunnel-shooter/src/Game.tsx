@@ -5,7 +5,7 @@ import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh, Pickups, type PickupRuntime } from "./LevelMesh";
 import { MapView } from "./MapView";
-import { bfsNextStep, clampToLevel, destroyProp, generateLevel, isPropDestructible, key, losAxisAligned, neighborCells, resolveShipProps, CELL, HALF, type Level } from "./level";
+import { bfsNextStep, clampToLevel, destroyProp, generateLevel, isPropDestructible, key, losAxisAligned, neighborCells, resolveShipProps, CELL, HALF, type Level, type PickupKind } from "./level";
 import {
   initialState,
   ROBOT_ARCHETYPES,
@@ -38,6 +38,14 @@ type Explosion = {
   kind: "spark" | "robot" | "reactor";
 };
 
+type Toast = {
+  id: number;
+  text: string;
+  color: string;
+  bornAt: number;
+  life: number;
+};
+
 type SharedRefs = {
   shipPos: THREE.Vector3;
   shipQuat: THREE.Quaternion;
@@ -48,6 +56,7 @@ type SharedRefs = {
   debris: Debris[];
   pickups: PickupRuntime[];
   fireRateBoost: { current: number };
+  toasts: { list: Toast[]; nextId: number };
   level: Level;
   setHud: React.Dispatch<React.SetStateAction<GameState>>;
   hud: React.MutableRefObject<GameState>;
@@ -71,6 +80,27 @@ const PICKUP_SCORE_VALUE = 150;
 const PICKUP_BOOST_DURATION = 5.0; // seconds
 const FIRE_COOLDOWN_NORMAL = 0.16;
 const FIRE_COOLDOWN_BOOSTED = 0.07;
+
+const TOAST_LIFE = 1.5;
+const TOAST_MAX = 6;
+const PICKUP_TOAST: Record<PickupKind, { text: string; color: string }> = {
+  shield_cell: { text: `+${PICKUP_SHIELD_RESTORE} SHIELDS`, color: "#7dd3fc" },
+  ammo_core:   { text: `FIRE RATE BOOST ${PICKUP_BOOST_DURATION.toFixed(0)}s`, color: "#fb923c" },
+  score_chip:  { text: `+${PICKUP_SCORE_VALUE} SCORE`, color: "#86efac" },
+};
+
+function pushToast(refs: SharedRefs, kind: PickupKind) {
+  const cfg = PICKUP_TOAST[kind];
+  const list = refs.toasts.list;
+  list.push({
+    id: refs.toasts.nextId++,
+    text: cfg.text,
+    color: cfg.color,
+    bornAt: performance.now(),
+    life: TOAST_LIFE,
+  });
+  if (list.length > TOAST_MAX) list.splice(0, list.length - TOAST_MAX);
+}
 
 type ContactKind = "wall" | "robot" | "debris";
 
@@ -910,6 +940,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
           refs.fireRateBoost.current = PICKUP_BOOST_DURATION;
           break;
       }
+      pushToast(refs, p.pickup.kind);
       hudChanged = true;
     }
     if (hudChanged) refs.setHud({ ...refs.hud.current });
@@ -1463,6 +1494,7 @@ function GameInner() {
       debris,
       pickups,
       fireRateBoost: { current: 0 },
+      toasts: { list: [], nextId: 1 },
       level,
       setHud: setHudState,
       hud: hudRef,
@@ -1587,6 +1619,7 @@ function GameInner() {
     refs.contactCooldown.current = 0;
     refs.damageFlash.current = 0;
     refs.fireRateBoost.current = 0;
+    refs.toasts.list.length = 0;
     for (let i = 0; i < refs.pickups.length; i++) refs.pickups[i]!.active = true;
     refs.robots.forEach((r, i) => {
       r.alive = true;
@@ -1659,6 +1692,9 @@ function GameInner() {
         onStart={startGame}
       />
       <DamageFlash refs={refs} />
+      {hudState.status === "playing" && (
+        <ToastOverlay refs={refs} />
+      )}
       {hudState.status === "playing" && !mapOpen && (
         <MiniRadar refs={refs} />
       )}
@@ -1930,6 +1966,109 @@ function MiniRadar({ refs }: { refs: SharedRefs }) {
     <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-orange-500/40 bg-black/40 shadow-lg">
       <canvas ref={canvasRef} width={180} height={180} className="block rounded-full" />
     </div>
+  );
+}
+
+function ToastOverlay({ refs }: { refs: SharedRefs }) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const boostFillRef = useRef<HTMLDivElement | null>(null);
+  const boostTextRef = useRef<HTMLSpanElement | null>(null);
+  const boostBoxRef = useRef<HTMLDivElement | null>(null);
+  // Tracks DOM nodes per toast id so we can update opacity/transform without
+  // rebuilding the tree every animation frame.
+  const nodesRef = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const now = performance.now();
+      const list = refs.toasts.list;
+      // Prune expired toasts.
+      for (let i = list.length - 1; i >= 0; i--) {
+        const age = (now - list[i]!.bornAt) / 1000;
+        if (age >= list[i]!.life) list.splice(i, 1);
+      }
+      const container = listRef.current;
+      if (container) {
+        const seen = new Set<number>();
+        for (const t of list) {
+          seen.add(t.id);
+          let el = nodesRef.current.get(t.id);
+          if (!el) {
+            el = document.createElement("div");
+            el.className =
+              "rounded border border-current bg-black/70 px-3 py-1 text-sm font-bold uppercase tracking-[0.25em] shadow-lg";
+            el.style.color = t.color;
+            el.style.willChange = "opacity, transform";
+            el.textContent = t.text;
+            container.appendChild(el);
+            nodesRef.current.set(t.id, el);
+          }
+          const age = (now - t.bornAt) / 1000;
+          const k = Math.min(1, age / t.life);
+          const fadeIn = Math.min(1, age / 0.12);
+          const fadeOut = k > 0.7 ? 1 - (k - 0.7) / 0.3 : 1;
+          const opacity = Math.max(0, Math.min(1, fadeIn * fadeOut));
+          const ty = -k * 24;
+          el.style.opacity = opacity.toFixed(3);
+          el.style.transform = `translateY(${ty.toFixed(1)}px)`;
+        }
+        // Remove DOM for toasts that expired.
+        for (const [id, el] of nodesRef.current) {
+          if (!seen.has(id)) {
+            el.remove();
+            nodesRef.current.delete(id);
+          }
+        }
+      }
+
+      const boost = refs.fireRateBoost.current;
+      const box = boostBoxRef.current;
+      if (box) {
+        if (boost > 0) {
+          box.style.opacity = "1";
+          const fill = boostFillRef.current;
+          if (fill) fill.style.width = `${Math.min(100, (boost / PICKUP_BOOST_DURATION) * 100)}%`;
+          const txt = boostTextRef.current;
+          if (txt) txt.textContent = `${boost.toFixed(1)}s`;
+        } else {
+          box.style.opacity = "0";
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(raf);
+      for (const el of nodesRef.current.values()) el.remove();
+      nodesRef.current.clear();
+    };
+  }, [refs]);
+
+  return (
+    <>
+      <div
+        ref={listRef}
+        className="pointer-events-none absolute left-1/2 top-[58%] flex -translate-x-1/2 flex-col items-center gap-1"
+      />
+      <div
+        ref={boostBoxRef}
+        className="pointer-events-none absolute bottom-28 right-4 rounded border border-orange-400/50 bg-black/60 px-3 py-2 text-xs uppercase tracking-widest text-orange-200 transition-opacity"
+        style={{ opacity: 0 }}
+      >
+        <div className="mb-1 flex items-center justify-between gap-3">
+          <span>Fire Rate</span>
+          <span ref={boostTextRef} className="text-orange-300">0.0s</span>
+        </div>
+        <div className="h-1.5 w-32 overflow-hidden rounded bg-orange-950">
+          <div
+            ref={boostFillRef}
+            className="h-full bg-gradient-to-r from-orange-500 to-yellow-300"
+            style={{ width: "0%" }}
+          />
+        </div>
+      </div>
+    </>
   );
 }
 
