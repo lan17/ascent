@@ -3,7 +3,6 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { EffectComposer, Bloom, Vignette, ChromaticAberration } from "@react-three/postprocessing";
 import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
-import RAPIER from "@dimforge/rapier3d-compat";
 import { LevelMesh } from "./LevelMesh";
 import { MapView } from "./MapView";
 import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, CELL, HALF, type Level } from "./level";
@@ -18,7 +17,11 @@ import {
 
 type Debris = {
   active: boolean;
-  body: RAPIER.RigidBody | null;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  quat: THREE.Quaternion;
+  angAxis: THREE.Vector3; // unit axis
+  angRate: number;        // rad/sec
   life: number;
   maxLife: number;
   geoIdx: number;
@@ -43,7 +46,6 @@ type SharedRefs = {
   robots: Robot[];
   explosions: Explosion[];
   debris: Debris[];
-  world: RAPIER.World;
   level: Level;
   setHud: React.Dispatch<React.SetStateAction<GameState>>;
   hud: React.MutableRefObject<GameState>;
@@ -158,37 +160,6 @@ const SHIP_RING_MAT = new THREE.MeshBasicMaterial({
   color: "#ff7a2e", transparent: true, opacity: 0.7, side: THREE.DoubleSide,
 });
 
-function buildLevelWallColliders(world: RAPIER.World, level: Level) {
-  const T = 1.0;
-  for (const cell of level.cells.values()) {
-    const cx = cell.x * CELL;
-    const cy = cell.y * CELL;
-    const cz = cell.z * CELL;
-    const faces: Array<{ open: boolean; nx: number; ny: number; nz: number }> = [
-      { open: cell.open.px, nx:  1, ny:  0, nz:  0 },
-      { open: cell.open.nx, nx: -1, ny:  0, nz:  0 },
-      { open: cell.open.py, nx:  0, ny:  1, nz:  0 },
-      { open: cell.open.ny, nx:  0, ny: -1, nz:  0 },
-      { open: cell.open.pz, nx:  0, ny:  0, nz:  1 },
-      { open: cell.open.nz, nx:  0, ny:  0, nz: -1 },
-    ];
-    for (const f of faces) {
-      if (f.open) continue;
-      const px = cx + f.nx * HALF;
-      const py = cy + f.ny * HALF;
-      const pz = cz + f.nz * HALF;
-      const hx = f.nx !== 0 ? T / 2 : HALF;
-      const hy = f.ny !== 0 ? T / 2 : HALF;
-      const hz = f.nz !== 0 ? T / 2 : HALF;
-      const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
-        .setTranslation(px, py, pz)
-        .setRestitution(0.55)
-        .setFriction(0.4);
-      world.createCollider(desc);
-    }
-  }
-}
-
 function spawnDebris(refs: SharedRefs, pos: THREE.Vector3, kind: RobotKind) {
   // Find an inactive slot; otherwise recycle the oldest active piece.
   const pool = refs.debris;
@@ -201,10 +172,6 @@ function spawnDebris(refs: SharedRefs, pos: THREE.Vector3, kind: RobotKind) {
   }
   if (slot < 0) slot = oldestSlot;
   const d = pool[slot]!;
-  if (d.body) {
-    refs.world.removeRigidBody(d.body);
-    d.body = null;
-  }
   d.active = true;
   d.bornAt = performance.now();
   d.maxLife = 1.4 + Math.random() * 0.7;
@@ -215,38 +182,27 @@ function spawnDebris(refs: SharedRefs, pos: THREE.Vector3, kind: RobotKind) {
   const ox = (Math.random() * 2 - 1) * 0.4;
   const oy = (Math.random() * 2 - 1) * 0.4;
   const oz = (Math.random() * 2 - 1) * 0.4;
+  d.pos.set(pos.x + ox, pos.y + oy, pos.z + oz);
   const spread = 9 + Math.random() * 4;
-  const vx = (Math.random() * 2 - 1) * spread;
-  const vy = (Math.random() * 2 - 1) * spread;
-  const vz = (Math.random() * 2 - 1) * spread;
-  const rbDesc = RAPIER.RigidBodyDesc.dynamic()
-    .setTranslation(pos.x + ox, pos.y + oy, pos.z + oz)
-    .setLinvel(vx, vy, vz)
-    .setAngvel({
-      x: (Math.random() * 2 - 1) * 8,
-      y: (Math.random() * 2 - 1) * 8,
-      z: (Math.random() * 2 - 1) * 8,
-    })
-    .setLinearDamping(0.25)
-    .setAngularDamping(0.15)
-    .setCcdEnabled(true);
-  const body = refs.world.createRigidBody(rbDesc);
-  const cDesc = RAPIER.ColliderDesc.ball(DEBRIS_RADII[d.geoIdx]!)
-    .setRestitution(0.55)
-    .setFriction(0.4)
-    .setDensity(1.2);
-  refs.world.createCollider(cDesc, body);
-  d.body = body;
+  d.vel.set(
+    (Math.random() * 2 - 1) * spread,
+    (Math.random() * 2 - 1) * spread,
+    (Math.random() * 2 - 1) * spread,
+  );
+  d.quat.identity();
+  d.angAxis.set(
+    Math.random() * 2 - 1,
+    Math.random() * 2 - 1,
+    Math.random() * 2 - 1,
+  );
+  if (d.angAxis.lengthSq() < 1e-6) d.angAxis.set(0, 1, 0);
+  d.angAxis.normalize();
+  d.angRate = (Math.random() * 6 + 3) * (Math.random() < 0.5 ? -1 : 1);
 }
 
 function clearAllDebris(refs: SharedRefs) {
   for (let i = 0; i < refs.debris.length; i++) {
-    const d = refs.debris[i]!;
-    if (d.body) {
-      refs.world.removeRigidBody(d.body);
-      d.body = null;
-    }
-    d.active = false;
+    refs.debris[i]!.active = false;
   }
 }
 
@@ -708,14 +664,12 @@ function DebrisPool({ refs }: { refs: SharedRefs }) {
       const d = pool[i]!;
       const m = meshRefs.current[i];
       if (!m) continue;
-      if (!d.active || !d.body) {
+      if (!d.active) {
         if (m.visible) m.visible = false;
         continue;
       }
-      const t = d.body.translation();
-      const r = d.body.rotation();
-      m.position.set(t.x, t.y, t.z);
-      m.quaternion.set(r.x, r.y, r.z, r.w);
+      m.position.copy(d.pos);
+      m.quaternion.copy(d.quat);
 
       // Pick the geometry/material for this piece (cheap if unchanged).
       const geo = DEBRIS_GEOS[d.geoIdx]!;
@@ -757,23 +711,29 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
     if (refs.paused.current) return;
     const d = Math.min(dt, 0.05);
 
-    // Step physics (debris-vs-wall and debris-vs-debris bouncing).
-    refs.world.timestep = d;
-    refs.world.step();
-
-    // Tick debris lifetimes and recycle expired pieces.
+    // Integrate debris (kinematic): move, dampen, bounce off level walls.
     const debrisPool = refs.debris;
+    const linDamp = Math.pow(0.55, d);
     for (let i = 0; i < debrisPool.length; i++) {
       const dp = debrisPool[i]!;
       if (!dp.active) continue;
       dp.life -= d;
-      if (dp.life <= 0) {
-        if (dp.body) {
-          refs.world.removeRigidBody(dp.body);
-          dp.body = null;
-        }
-        dp.active = false;
-      }
+      if (dp.life <= 0) { dp.active = false; continue; }
+
+      _vPrev.copy(dp.pos);
+      dp.pos.addScaledVector(dp.vel, d);
+      _vTarget.copy(dp.pos);
+      const clamped = clampToLevel(refs.level, _vTarget, _vPrev);
+      // Reflect velocity on whichever axes were corrected by the wall clamp.
+      if (Math.abs(clamped.x - dp.pos.x) > 1e-4) dp.vel.x = -dp.vel.x * 0.55;
+      if (Math.abs(clamped.y - dp.pos.y) > 1e-4) dp.vel.y = -dp.vel.y * 0.55;
+      if (Math.abs(clamped.z - dp.pos.z) > 1e-4) dp.vel.z = -dp.vel.z * 0.55;
+      dp.pos.copy(clamped);
+      dp.vel.multiplyScalar(linDamp);
+      // Spin
+      _quatA.setFromAxisAngle(dp.angAxis, dp.angRate * d);
+      dp.quat.multiply(_quatA);
+      dp.angRate *= linDamp;
     }
 
     // Lasers — iterate fixed pool, no React render, no splice
@@ -1088,12 +1048,6 @@ function hasWebGL(): boolean {
 
 export function Game() {
   const [webglOk] = useState(() => hasWebGL());
-  const [physicsReady, setPhysicsReady] = useState(false);
-  useEffect(() => {
-    let mounted = true;
-    RAPIER.init().then(() => { if (mounted) setPhysicsReady(true); });
-    return () => { mounted = false; };
-  }, []);
   if (!webglOk) {
     const href = typeof window !== "undefined" ? window.location.href : "#";
     return (
@@ -1115,16 +1069,6 @@ export function Game() {
         >
           OPEN IN NEW TAB
         </a>
-      </div>
-    );
-  }
-  if (!physicsReady) {
-    return (
-      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black p-8 text-center text-orange-200">
-        <h1 className="mb-4 text-3xl font-black tracking-[0.3em] text-orange-400">
-          DEEP MINE
-        </h1>
-        <p className="text-sm text-orange-200/80">Loading physics…</p>
       </div>
     );
   }
@@ -1204,7 +1148,11 @@ function GameInner() {
     for (let i = 0; i < DEBRIS_POOL_SIZE; i++) {
       debris.push({
         active: false,
-        body: null,
+        pos: new THREE.Vector3(),
+        vel: new THREE.Vector3(),
+        quat: new THREE.Quaternion(),
+        angAxis: new THREE.Vector3(0, 1, 0),
+        angRate: 0,
         life: 0,
         maxLife: 1,
         geoIdx: 0,
@@ -1212,8 +1160,6 @@ function GameInner() {
         bornAt: 0,
       });
     }
-    const world = new RAPIER.World({ x: 0, y: 0, z: 0 });
-    buildLevelWallColliders(world, level);
     return {
       shipPos: level.start.clone(),
       shipQuat: new THREE.Quaternion(),
@@ -1222,7 +1168,6 @@ function GameInner() {
       robots,
       explosions,
       debris,
-      world,
       level,
       setHud: setHudState,
       hud: hudRef,
@@ -1231,13 +1176,6 @@ function GameInner() {
       paused: pausedRef,
     };
   }, [level]);
-
-  useEffect(() => {
-    return () => {
-      // Free the WASM-backed world when this GameInner unmounts.
-      refs.world.free();
-    };
-  }, [refs]);
 
   useEffect(() => {
     setHudState((s) => ({ ...s, enemiesLeft: refs.robots.length }));
