@@ -40,6 +40,7 @@ type Explosion = {
 
 type Toast = {
   id: number;
+  kind: PickupKind;
   text: string;
   color: string;
   bornAt: number;
@@ -89,11 +90,23 @@ const PICKUP_TOAST: Record<PickupKind, { text: string; color: string }> = {
   score_chip:  { text: `+${PICKUP_SCORE_VALUE} SCORE`, color: "#86efac" },
 };
 
+// Inline SVGs sized to match the toast cap-height. `currentColor` lets them
+// pick up the toast color set on the parent element.
+const TOAST_ICON_SVG: Record<PickupKind, string> = {
+  shield_cell:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3z"/></svg>',
+  ammo_core:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
+  score_chip:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9z"/><path d="M3 9h2M3 13h2M19 9h2M19 13h2M9 3v2M13 3v2M9 19v2M13 19v2"/></svg>',
+};
+
 function pushToast(refs: SharedRefs, kind: PickupKind) {
   const cfg = PICKUP_TOAST[kind];
   const list = refs.toasts.list;
   list.push({
     id: refs.toasts.nextId++,
+    kind,
     text: cfg.text,
     color: cfg.color,
     bornAt: performance.now(),
@@ -1997,10 +2010,10 @@ function ToastOverlay({ refs }: { refs: SharedRefs }) {
           if (!el) {
             el = document.createElement("div");
             el.className =
-              "rounded border border-current bg-black/70 px-3 py-1 text-sm font-bold uppercase tracking-[0.25em] shadow-lg";
+              "flex items-center gap-2 rounded border border-current bg-black/70 px-3 py-1 text-sm font-bold uppercase tracking-[0.25em] shadow-lg";
             el.style.color = t.color;
             el.style.willChange = "opacity, transform";
-            el.textContent = t.text;
+            el.innerHTML = `${TOAST_ICON_SVG[t.kind]}<span>${t.text}</span>`;
             container.appendChild(el);
             nodesRef.current.set(t.id, el);
           }
