@@ -424,6 +424,7 @@ function ShipController({ refs }: { refs: SharedRefs }) {
           const over = impact - CONTACT_SPEED_THRESHOLD.robot;
           const robotDmg = Math.min(30, Math.max(3, Math.round(over * CONTACT_DAMAGE_PER_UNIT.robot)));
           r.hp -= robotDmg;
+          r.hitFlash = 0.12;
           if (r.hp <= 0) {
             r.alive = false;
             spawnExplosion(refs, r.pos, "robot");
@@ -540,37 +541,53 @@ function LaserPool({ refs }: { refs: SharedRefs }) {
   );
 }
 
+const HIT_FLASH_DURATION = 0.12;
+const HULL_EMISSIVE_BASE = 0.4;
+const HULL_EMISSIVE_FLASH = 3.2;
+const RING_EMISSIVE_BASE = 2.2;
+const RING_EMISSIVE_FLASH = 6.0;
+
 function RobotPool({ refs }: { refs: SharedRefs }) {
   const groupRefs = useRef<(THREE.Group | null)[]>([]);
   const ringRefs = useRef<(THREE.Mesh | null)[]>([]);
   const eyeMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
+  const hullMatRefs = useRef<(THREE.MeshStandardMaterial | null)[]>([]);
+  const ringMatRefs = useRef<(THREE.MeshStandardMaterial | null)[]>([]);
 
-  // Per-kind material caches so tint matches archetype.
+  // Per-kind material caches so tint matches archetype. Halo is shared per
+  // kind; hull and ring are cloned per robot so individual hits can flash
+  // without affecting other robots of the same kind.
   type KindMatEntry = {
-    hull: THREE.MeshStandardMaterial;
-    ring: THREE.MeshStandardMaterial;
     halo: THREE.MeshBasicMaterial;
     eyeRGB: [number, number, number];
   };
   const kindMats = useMemo<Record<RobotKind, KindMatEntry>>(() => {
     const entries = (Object.keys(ROBOT_ARCHETYPES) as RobotKind[]).map((k): [RobotKind, KindMatEntry] => {
       const a = ROBOT_ARCHETYPES[k];
-      const ring = ROBOT_RING_MAT.clone();
-      ring.color.set(a.ringColor);
-      ring.emissive.set(a.ringColor);
       const halo = ROBOT_HALO_MAT.clone();
       halo.color.set(a.haloColor);
-      const hull = ROBOT_HULL_MAT.clone();
-      hull.color.set(a.tint);
       const c = new THREE.Color(a.ringColor);
-      return [k, { hull, ring, halo, eyeRGB: [c.r, c.g, c.b] }];
+      return [k, { halo, eyeRGB: [c.r, c.g, c.b] }];
     });
     return Object.fromEntries(entries) as Record<RobotKind, KindMatEntry>;
   }, []);
 
-  useFrame((state) => {
+  const robotMats = useMemo(() => {
+    return refs.robots.map((r) => {
+      const a = ROBOT_ARCHETYPES[r.kind];
+      const hull = ROBOT_HULL_MAT.clone();
+      hull.color.set(a.tint);
+      const ring = ROBOT_RING_MAT.clone();
+      ring.color.set(a.ringColor);
+      ring.emissive.set(a.ringColor);
+      return { hull, ring };
+    });
+  }, [refs.robots]);
+
+  useFrame((state, dt) => {
     if (refs.paused.current) return;
     const t = state.clock.elapsedTime;
+    const d = Math.min(dt, 0.05);
     const robots = refs.robots;
     for (let i = 0; i < robots.length; i++) {
       const r = robots[i]!;
@@ -596,6 +613,23 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
         const rgb = kindMats[r.kind].eyeRGB;
         m.color.setRGB(rgb[0] * pulse, rgb[1] * pulse, rgb[2] * pulse);
       }
+      // Hit flash: decay timer and modulate hull/ring emissive intensity
+      // plus a tiny scale punch so each hit feels solid.
+      if (r.hitFlash > 0) {
+        r.hitFlash -= d;
+        if (r.hitFlash < 0) r.hitFlash = 0;
+      }
+      const flash = r.hitFlash > 0 ? r.hitFlash / HIT_FLASH_DURATION : 0;
+      const hullMat = hullMatRefs.current[i];
+      if (hullMat) {
+        hullMat.emissiveIntensity = HULL_EMISSIVE_BASE + (HULL_EMISSIVE_FLASH - HULL_EMISSIVE_BASE) * flash;
+      }
+      const ringMat = ringMatRefs.current[i];
+      if (ringMat) {
+        ringMat.emissiveIntensity = RING_EMISSIVE_BASE + (RING_EMISSIVE_FLASH - RING_EMISSIVE_BASE) * flash;
+      }
+      const punch = 1 + flash * 0.12;
+      g.scale.setScalar(ROBOT_ARCHETYPES[r.kind].scale * punch);
     }
   });
 
@@ -604,17 +638,20 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
       {refs.robots.map((r, i) => {
         const a = ROBOT_ARCHETYPES[r.kind];
         const mats = kindMats[r.kind];
+        const rm = robotMats[i]!;
+        hullMatRefs.current[i] = rm.hull;
+        ringMatRefs.current[i] = rm.ring;
         return (
           <group
             key={i}
             ref={(el) => { groupRefs.current[i] = el; }}
             scale={a.scale}
           >
-            <mesh geometry={ROBOT_HULL_GEO} material={mats.hull} />
+            <mesh geometry={ROBOT_HULL_GEO} material={rm.hull} />
             <mesh geometry={ROBOT_BELT_GEO} material={ROBOT_BELT_MAT} rotation={[Math.PI / 2, 0, 0]} />
             <mesh
               geometry={ROBOT_RING_GEO}
-              material={mats.ring}
+              material={rm.ring}
               ref={(el) => { ringRefs.current[i] = el; }}
             />
             <mesh geometry={ROBOT_EYE_GEO}>
@@ -917,6 +954,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
           if (!R.alive) continue;
           if (L.pos.distanceToSquared(R.pos) < 1.8 * 1.8) {
             R.hp -= 25;
+            R.hitFlash = 0.12;
             spawnExplosion(refs, L.pos, "spark");
             if (R.hp <= 0) {
               R.alive = false;
@@ -1254,6 +1292,7 @@ function GameInner() {
         aiTimer: Math.random() * 0.4,
         cellOffset: new THREE.Vector3(),
         strafeTimer: Math.random() * 0.5,
+        hitFlash: 0,
       };
     });
     const lasers: Laser[] = [];

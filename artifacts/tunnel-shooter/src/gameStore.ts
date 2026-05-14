@@ -120,6 +120,7 @@ export type Robot = {
   aiTimer: number;
   cellOffset: THREE.Vector3;
   strafeTimer: number;
+  hitFlash: number;
 };
 
 export type GameState = {
