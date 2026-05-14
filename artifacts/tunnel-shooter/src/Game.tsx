@@ -2013,7 +2013,7 @@ function ToastOverlay({ refs }: { refs: SharedRefs }) {
               "flex items-center gap-2 rounded border border-current bg-black/70 px-3 py-1 text-sm font-bold uppercase tracking-[0.25em] shadow-lg";
             el.style.color = t.color;
             el.style.willChange = "opacity, transform";
-            el.innerHTML = `${TOAST_ICON_SVG[t.kind]}<span>${t.text}</span>`;
+            el.innerHTML = `<span class="toast-icon" style="display:inline-flex;will-change:filter">${TOAST_ICON_SVG[t.kind]}</span><span>${t.text}</span>`;
             container.appendChild(el);
             nodesRef.current.set(t.id, el);
           }
@@ -2023,8 +2023,23 @@ function ToastOverlay({ refs }: { refs: SharedRefs }) {
           const fadeOut = k > 0.7 ? 1 - (k - 0.7) / 0.3 : 1;
           const opacity = Math.max(0, Math.min(1, fadeIn * fadeOut));
           const ty = -k * 24;
+          // Pop-in: 0.8 -> 1.05 -> 1.0 over ~150ms (two-phase ease).
+          let scale = 1;
+          if (age < 0.075) {
+            const p = age / 0.075;
+            scale = 0.8 + (1.05 - 0.8) * p;
+          } else if (age < 0.15) {
+            const p = (age - 0.075) / 0.075;
+            scale = 1.05 + (1.0 - 1.05) * p;
+          }
           el.style.opacity = opacity.toFixed(3);
-          el.style.transform = `translateY(${ty.toFixed(1)}px)`;
+          el.style.transform = `translateY(${ty.toFixed(1)}px) scale(${scale.toFixed(3)})`;
+          // Icon flash: glow drop-shadow for the first ~200ms, eased out.
+          const iconEl = el.firstElementChild as HTMLElement | null;
+          if (iconEl) {
+            const g = age < 0.2 ? 1 - age / 0.2 : 0;
+            iconEl.style.filter = g > 0 ? `drop-shadow(0 0 ${(6 * g).toFixed(2)}px ${t.color})` : "";
+          }
         }
         // Remove DOM for toasts that expired.
         for (const [id, el] of nodesRef.current) {
