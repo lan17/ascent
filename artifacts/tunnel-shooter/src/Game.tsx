@@ -3,6 +3,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { EffectComposer, Bloom, Vignette, ChromaticAberration } from "@react-three/postprocessing";
 import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
+import RAPIER from "@dimforge/rapier3d-compat";
 import { LevelMesh } from "./LevelMesh";
 import { MapView } from "./MapView";
 import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, CELL, HALF, type Level } from "./level";
@@ -14,6 +15,16 @@ import {
   type Robot,
   type RobotKind,
 } from "./gameStore";
+
+type Debris = {
+  active: boolean;
+  body: RAPIER.RigidBody | null;
+  life: number;
+  maxLife: number;
+  geoIdx: number;
+  kind: RobotKind;
+  bornAt: number;
+};
 
 type Explosion = {
   active: boolean;
@@ -31,6 +42,8 @@ type SharedRefs = {
   lasers: Laser[];
   robots: Robot[];
   explosions: Explosion[];
+  debris: Debris[];
+  world: RAPIER.World;
   level: Level;
   setHud: React.Dispatch<React.SetStateAction<GameState>>;
   hud: React.MutableRefObject<GameState>;
@@ -59,6 +72,16 @@ const _quatA = new THREE.Quaternion();
 // ---------- Pool sizing ----------
 const LASER_POOL_SIZE = 64;
 const EXPLOSION_POOL_SIZE = 32;
+const DEBRIS_POOL_SIZE = 60;
+const DEBRIS_PER_DEATH = 7;
+
+// Debris reuses the existing robot sub-geometries (hull shard, belt fragment,
+// ring fragment) at a smaller display scale so chunks read as "pieces of that
+// robot." Collider radii are matched to the displayed size.
+// (Initialized below once ROBOT_* geometries are declared.)
+let DEBRIS_GEOS: THREE.BufferGeometry[] = [];
+let DEBRIS_DISPLAY_SCALES: number[] = [];
+let DEBRIS_RADII: number[] = [];
 
 // ---------- Shared geometries / materials ----------
 const LASER_CORE_GEO = new THREE.CylinderGeometry(0.08, 0.08, 1.8, 6);
@@ -78,6 +101,16 @@ const LASER_HALO_MAT_HOSTILE = new THREE.MeshBasicMaterial({
 const ROBOT_HULL_GEO = new THREE.OctahedronGeometry(1.4, 0);
 const ROBOT_BELT_GEO = new THREE.TorusGeometry(1.05, 0.18, 8, 16);
 const ROBOT_RING_GEO = new THREE.TorusGeometry(1.7, 0.05, 6, 32);
+
+// Debris reuses the robot sub-geometries directly. Mesh scale shrinks them to
+// chunk size; collider radius matches the rendered radius.
+DEBRIS_GEOS = [ROBOT_HULL_GEO, ROBOT_BELT_GEO, ROBOT_RING_GEO];
+DEBRIS_DISPLAY_SCALES = [0.4, 0.5, 0.35];
+DEBRIS_RADII = [
+  1.4 * DEBRIS_DISPLAY_SCALES[0]!,            // hull shard ~0.56
+  (1.05 + 0.18) * DEBRIS_DISPLAY_SCALES[1]!,  // belt fragment ~0.62
+  (1.7 + 0.05) * DEBRIS_DISPLAY_SCALES[2]!,   // ring fragment ~0.61
+];
 const ROBOT_EYE_GEO = new THREE.SphereGeometry(0.5, 16, 16);
 const ROBOT_HALO_GEO = new THREE.SphereGeometry(0.85, 12, 12);
 
@@ -96,6 +129,20 @@ const ROBOT_HALO_MAT = new THREE.MeshBasicMaterial({
   blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
 });
 
+// Per-kind hull material used by debris pieces (tinted to the source robot).
+const DEBRIS_HULL_MATS: Record<RobotKind, THREE.MeshStandardMaterial> = (() => {
+  const out = {} as Record<RobotKind, THREE.MeshStandardMaterial>;
+  for (const k of Object.keys(ROBOT_ARCHETYPES) as RobotKind[]) {
+    const a = ROBOT_ARCHETYPES[k];
+    const m = ROBOT_HULL_MAT.clone();
+    m.color.set(a.tint);
+    m.emissive.set(a.tint);
+    m.emissiveIntensity = 0.25;
+    out[k] = m;
+  }
+  return out;
+})();
+
 const EXPLOSION_CORE_GEO = new THREE.IcosahedronGeometry(1, 1);
 const EXPLOSION_HALO_GEO = new THREE.SphereGeometry(1, 12, 12);
 const EXPLOSION_RING_GEO = new THREE.RingGeometry(0.7, 1.0, 24);
@@ -110,6 +157,98 @@ const SHIP_RING_GEO = new THREE.RingGeometry(0.08, 0.1, 24);
 const SHIP_RING_MAT = new THREE.MeshBasicMaterial({
   color: "#ff7a2e", transparent: true, opacity: 0.7, side: THREE.DoubleSide,
 });
+
+function buildLevelWallColliders(world: RAPIER.World, level: Level) {
+  const T = 1.0;
+  for (const cell of level.cells.values()) {
+    const cx = cell.x * CELL;
+    const cy = cell.y * CELL;
+    const cz = cell.z * CELL;
+    const faces: Array<{ open: boolean; nx: number; ny: number; nz: number }> = [
+      { open: cell.open.px, nx:  1, ny:  0, nz:  0 },
+      { open: cell.open.nx, nx: -1, ny:  0, nz:  0 },
+      { open: cell.open.py, nx:  0, ny:  1, nz:  0 },
+      { open: cell.open.ny, nx:  0, ny: -1, nz:  0 },
+      { open: cell.open.pz, nx:  0, ny:  0, nz:  1 },
+      { open: cell.open.nz, nx:  0, ny:  0, nz: -1 },
+    ];
+    for (const f of faces) {
+      if (f.open) continue;
+      const px = cx + f.nx * HALF;
+      const py = cy + f.ny * HALF;
+      const pz = cz + f.nz * HALF;
+      const hx = f.nx !== 0 ? T / 2 : HALF;
+      const hy = f.ny !== 0 ? T / 2 : HALF;
+      const hz = f.nz !== 0 ? T / 2 : HALF;
+      const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
+        .setTranslation(px, py, pz)
+        .setRestitution(0.55)
+        .setFriction(0.4);
+      world.createCollider(desc);
+    }
+  }
+}
+
+function spawnDebris(refs: SharedRefs, pos: THREE.Vector3, kind: RobotKind) {
+  // Find an inactive slot; otherwise recycle the oldest active piece.
+  const pool = refs.debris;
+  let slot = -1;
+  let oldest = Infinity;
+  let oldestSlot = 0;
+  for (let i = 0; i < pool.length; i++) {
+    if (!pool[i]!.active) { slot = i; break; }
+    if (pool[i]!.bornAt < oldest) { oldest = pool[i]!.bornAt; oldestSlot = i; }
+  }
+  if (slot < 0) slot = oldestSlot;
+  const d = pool[slot]!;
+  if (d.body) {
+    refs.world.removeRigidBody(d.body);
+    d.body = null;
+  }
+  d.active = true;
+  d.bornAt = performance.now();
+  d.maxLife = 1.4 + Math.random() * 0.7;
+  d.life = d.maxLife;
+  d.kind = kind;
+  d.geoIdx = Math.floor(Math.random() * DEBRIS_GEOS.length);
+
+  const ox = (Math.random() * 2 - 1) * 0.4;
+  const oy = (Math.random() * 2 - 1) * 0.4;
+  const oz = (Math.random() * 2 - 1) * 0.4;
+  const spread = 9 + Math.random() * 4;
+  const vx = (Math.random() * 2 - 1) * spread;
+  const vy = (Math.random() * 2 - 1) * spread;
+  const vz = (Math.random() * 2 - 1) * spread;
+  const rbDesc = RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(pos.x + ox, pos.y + oy, pos.z + oz)
+    .setLinvel(vx, vy, vz)
+    .setAngvel({
+      x: (Math.random() * 2 - 1) * 8,
+      y: (Math.random() * 2 - 1) * 8,
+      z: (Math.random() * 2 - 1) * 8,
+    })
+    .setLinearDamping(0.25)
+    .setAngularDamping(0.15)
+    .setCcdEnabled(true);
+  const body = refs.world.createRigidBody(rbDesc);
+  const cDesc = RAPIER.ColliderDesc.ball(DEBRIS_RADII[d.geoIdx]!)
+    .setRestitution(0.55)
+    .setFriction(0.4)
+    .setDensity(1.2);
+  refs.world.createCollider(cDesc, body);
+  d.body = body;
+}
+
+function clearAllDebris(refs: SharedRefs) {
+  for (let i = 0; i < refs.debris.length; i++) {
+    const d = refs.debris[i]!;
+    if (d.body) {
+      refs.world.removeRigidBody(d.body);
+      d.body = null;
+    }
+    d.active = false;
+  }
+}
 
 function spawnExplosion(refs: SharedRefs, pos: THREE.Vector3, kind: Explosion["kind"]) {
   const pool = refs.explosions;
@@ -232,6 +371,43 @@ function ShipController({ refs }: { refs: SharedRefs }) {
       if (Math.abs(_vDiff.y) > 0.0001) refs.shipVel.y = 0;
       if (Math.abs(_vDiff.z) > 0.0001) refs.shipVel.z = 0;
       refs.shipPos.copy(clamped);
+    }
+
+    // Ship-vs-robot blocking: treat each live robot as a solid sphere.
+    const SHIP_R = 0.7;
+    const robots = refs.robots;
+    let pushedByRobot = false;
+    for (let i = 0; i < robots.length; i++) {
+      const r = robots[i]!;
+      if (!r.alive) continue;
+      const arch = ROBOT_ARCHETYPES[r.kind];
+      const robotR = 1.4 * arch.scale + SHIP_R;
+      _vDiff.copy(refs.shipPos).sub(r.pos);
+      const distSq = _vDiff.lengthSq();
+      if (distSq >= robotR * robotR) continue;
+      if (distSq < 1e-6) {
+        _vDiff.set(0, 0, -1).applyQuaternion(refs.shipQuat);
+        refs.shipPos.addScaledVector(_vDiff, robotR);
+        continue;
+      }
+      const dist = Math.sqrt(distSq);
+      _vDiff.multiplyScalar(1 / dist); // unit normal robot -> ship
+      const penetration = robotR - dist;
+      refs.shipPos.addScaledVector(_vDiff, penetration);
+      const vDotN = refs.shipVel.dot(_vDiff);
+      if (vDotN < 0) refs.shipVel.addScaledVector(_vDiff, -vDotN);
+      pushedByRobot = true;
+    }
+    if (pushedByRobot) {
+      _vPrev.copy(refs.shipPos);
+      const c2 = clampToLevel(refs.level, refs.shipPos, _vPrev);
+      if (!c2.equals(refs.shipPos)) {
+        _vDiff.copy(c2).sub(refs.shipPos);
+        if (Math.abs(_vDiff.x) > 0.0001) refs.shipVel.x = 0;
+        if (Math.abs(_vDiff.y) > 0.0001) refs.shipVel.y = 0;
+        if (Math.abs(_vDiff.z) > 0.0001) refs.shipVel.z = 0;
+        refs.shipPos.copy(c2);
+      }
     }
 
     // --- Camera ---
@@ -522,11 +698,83 @@ function ExplosionPool({ refs }: { refs: SharedRefs }) {
   );
 }
 
+function DebrisPool({ refs }: { refs: SharedRefs }) {
+  const meshRefs = useRef<(THREE.Mesh | null)[]>([]);
+
+  useFrame(() => {
+    if (refs.paused.current) return;
+    const pool = refs.debris;
+    for (let i = 0; i < pool.length; i++) {
+      const d = pool[i]!;
+      const m = meshRefs.current[i];
+      if (!m) continue;
+      if (!d.active || !d.body) {
+        if (m.visible) m.visible = false;
+        continue;
+      }
+      const t = d.body.translation();
+      const r = d.body.rotation();
+      m.position.set(t.x, t.y, t.z);
+      m.quaternion.set(r.x, r.y, r.z, r.w);
+
+      // Pick the geometry/material for this piece (cheap if unchanged).
+      const geo = DEBRIS_GEOS[d.geoIdx]!;
+      if (m.geometry !== geo) m.geometry = geo;
+      const mat = DEBRIS_HULL_MATS[d.kind];
+      if (m.material !== mat) m.material = mat;
+
+      // Shrink near end of life so it fades out. Combine with the per-geo
+      // display scale so reused robot sub-geometries appear as chunks.
+      const u = d.life / d.maxLife;
+      const fade = u < 0.3 ? Math.max(0, u / 0.3) : 1;
+      m.scale.setScalar(DEBRIS_DISPLAY_SCALES[d.geoIdx]! * fade);
+      m.visible = true;
+    }
+  });
+
+  const slots = useMemo(
+    () => Array.from({ length: DEBRIS_POOL_SIZE }, (_, i) => i),
+    [],
+  );
+  return (
+    <>
+      {slots.map((i) => (
+        <mesh
+          key={i}
+          visible={false}
+          geometry={DEBRIS_GEOS[0]}
+          material={DEBRIS_HULL_MATS.grunt}
+          ref={(el) => { meshRefs.current[i] = el; }}
+        />
+      ))}
+    </>
+  );
+}
+
 function GameLoop({ refs }: { refs: SharedRefs }) {
   useFrame((_, dt) => {
     if (refs.hud.current.status !== "playing") return;
     if (refs.paused.current) return;
     const d = Math.min(dt, 0.05);
+
+    // Step physics (debris-vs-wall and debris-vs-debris bouncing).
+    refs.world.timestep = d;
+    refs.world.step();
+
+    // Tick debris lifetimes and recycle expired pieces.
+    const debrisPool = refs.debris;
+    for (let i = 0; i < debrisPool.length; i++) {
+      const dp = debrisPool[i]!;
+      if (!dp.active) continue;
+      dp.life -= d;
+      if (dp.life <= 0) {
+        if (dp.body) {
+          refs.world.removeRigidBody(dp.body);
+          dp.body = null;
+        }
+        dp.active = false;
+      }
+    }
 
     // Lasers — iterate fixed pool, no React render, no splice
     const pool = refs.lasers;
@@ -578,6 +826,9 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
             if (R.hp <= 0) {
               R.alive = false;
               spawnExplosion(refs, R.pos, "robot");
+              for (let dpi = 0; dpi < DEBRIS_PER_DEATH; dpi++) {
+                spawnDebris(refs, R.pos, R.kind);
+              }
               const hud = refs.hud.current;
               hud.score += ROBOT_ARCHETYPES[R.kind].scoreValue;
               hud.enemiesLeft -= 1;
@@ -837,6 +1088,12 @@ function hasWebGL(): boolean {
 
 export function Game() {
   const [webglOk] = useState(() => hasWebGL());
+  const [physicsReady, setPhysicsReady] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    RAPIER.init().then(() => { if (mounted) setPhysicsReady(true); });
+    return () => { mounted = false; };
+  }, []);
   if (!webglOk) {
     const href = typeof window !== "undefined" ? window.location.href : "#";
     return (
@@ -858,6 +1115,16 @@ export function Game() {
         >
           OPEN IN NEW TAB
         </a>
+      </div>
+    );
+  }
+  if (!physicsReady) {
+    return (
+      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black p-8 text-center text-orange-200">
+        <h1 className="mb-4 text-3xl font-black tracking-[0.3em] text-orange-400">
+          DEEP MINE
+        </h1>
+        <p className="text-sm text-orange-200/80">Loading physics…</p>
       </div>
     );
   }
@@ -933,6 +1200,20 @@ function GameInner() {
         kind: "spark",
       });
     }
+    const debris: Debris[] = [];
+    for (let i = 0; i < DEBRIS_POOL_SIZE; i++) {
+      debris.push({
+        active: false,
+        body: null,
+        life: 0,
+        maxLife: 1,
+        geoIdx: 0,
+        kind: "grunt",
+        bornAt: 0,
+      });
+    }
+    const world = new RAPIER.World({ x: 0, y: 0, z: 0 });
+    buildLevelWallColliders(world, level);
     return {
       shipPos: level.start.clone(),
       shipQuat: new THREE.Quaternion(),
@@ -940,6 +1221,8 @@ function GameInner() {
       lasers,
       robots,
       explosions,
+      debris,
+      world,
       level,
       setHud: setHudState,
       hud: hudRef,
@@ -948,6 +1231,13 @@ function GameInner() {
       paused: pausedRef,
     };
   }, [level]);
+
+  useEffect(() => {
+    return () => {
+      // Free the WASM-backed world when this GameInner unmounts.
+      refs.world.free();
+    };
+  }, [refs]);
 
   useEffect(() => {
     setHudState((s) => ({ ...s, enemiesLeft: refs.robots.length }));
@@ -1056,6 +1346,7 @@ function GameInner() {
     refs.shipVel.set(0, 0, 0);
     for (let i = 0; i < refs.lasers.length; i++) refs.lasers[i]!.active = false;
     for (let i = 0; i < refs.explosions.length; i++) refs.explosions[i]!.active = false;
+    clearAllDebris(refs);
     refs.robots.forEach((r, i) => {
       r.alive = true;
       r.hp = ROBOT_ARCHETYPES[r.kind].maxHp;
@@ -1101,6 +1392,7 @@ function GameInner() {
         <LaserPool refs={refs} />
         <RobotPool refs={refs} />
         <ExplosionPool refs={refs} />
+        <DebrisPool refs={refs} />
         <Headlight refs={refs} />
         <EffectComposer multisampling={0}>
           <Bloom
