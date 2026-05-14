@@ -12,41 +12,52 @@ type Props = {
   onClose: () => void;
 };
 
-// Build line segments for every closed wall face of every cell.
-// This produces a wireframe blueprint of the whole level, region-color-coded.
+// Build clean wireframe geometry: one box outline per room + polyline per corridor.
+// This avoids drawing every cell face, which produced overlapping line clutter.
 function buildMapGeometry(level: Level) {
   const positions: number[] = [];
   const colors: number[] = [];
 
   const KIND_COLOR: Record<string, THREE.Color> = {
-    corridor: new THREE.Color("#3a8acc"),
-    hub:      new THREE.Color("#ff8a3a"),
-    shaft:    new THREE.Color("#7a55ff"),
-    reactor:  new THREE.Color("#ff3344"),
+    hub:     new THREE.Color("#ff8a3a"),
+    shaft:   new THREE.Color("#7a55ff"),
+    reactor: new THREE.Color("#ff3344"),
   };
+  const CORRIDOR_COLOR = new THREE.Color("#3a8acc");
 
-  for (const cell of level.cells.values()) {
-    const ox = cell.x * CELL, oy = cell.y * CELL, oz = cell.z * CELL;
-    const col = KIND_COLOR[cell.kind] ?? KIND_COLOR.corridor!;
-    const p = (sx: number, sy: number, sz: number) =>
-      [ox + sx * HALF, oy + sy * HALF, oz + sz * HALF] as [number, number, number];
-
-    const faces: Array<{ open: boolean; corners: Array<[number, number, number]> }> = [
-      { open: cell.open.px, corners: [p(1, -1, -1), p(1, -1, 1), p(1, 1, 1), p(1, 1, -1)] },
-      { open: cell.open.nx, corners: [p(-1, -1, 1), p(-1, -1, -1), p(-1, 1, -1), p(-1, 1, 1)] },
-      { open: cell.open.py, corners: [p(-1, 1, -1), p(1, 1, -1), p(1, 1, 1), p(-1, 1, 1)] },
-      { open: cell.open.ny, corners: [p(-1, -1, 1), p(1, -1, 1), p(1, -1, -1), p(-1, -1, -1)] },
-      { open: cell.open.pz, corners: [p(1, -1, 1), p(-1, -1, 1), p(-1, 1, 1), p(1, 1, 1)] },
-      { open: cell.open.nz, corners: [p(-1, -1, -1), p(1, -1, -1), p(1, 1, -1), p(-1, 1, -1)] },
+  // Each room → 12 edges of its bounding box.
+  const boxEdges: Array<[number, number]> = [
+    [0, 1], [1, 2], [2, 3], [3, 0],
+    [4, 5], [5, 6], [6, 7], [7, 4],
+    [0, 4], [1, 5], [2, 6], [3, 7],
+  ];
+  for (const r of level.rooms) {
+    const col = KIND_COLOR[r.kind] ?? KIND_COLOR.hub!;
+    const minX = r.min[0] * CELL - HALF, maxX = r.max[0] * CELL + HALF;
+    const minY = r.min[1] * CELL - HALF, maxY = r.max[1] * CELL + HALF;
+    const minZ = r.min[2] * CELL - HALF, maxZ = r.max[2] * CELL + HALF;
+    const corners: Array<[number, number, number]> = [
+      [minX, minY, minZ], [maxX, minY, minZ],
+      [maxX, minY, maxZ], [minX, minY, maxZ],
+      [minX, maxY, minZ], [maxX, maxY, minZ],
+      [maxX, maxY, maxZ], [minX, maxY, maxZ],
     ];
-    for (const f of faces) {
-      if (f.open) continue;
-      for (let i = 0; i < 4; i++) {
-        const a = f.corners[i]!;
-        const b = f.corners[(i + 1) % 4]!;
-        positions.push(a[0], a[1], a[2], b[0], b[1], b[2]);
-        for (let k = 0; k < 2; k++) colors.push(col.r, col.g, col.b);
-      }
+    for (const [a, b] of boxEdges) {
+      const A = corners[a]!, B = corners[b]!;
+      positions.push(A[0], A[1], A[2], B[0], B[1], B[2]);
+      colors.push(col.r, col.g, col.b, col.r, col.g, col.b);
+    }
+  }
+
+  // Each corridor → polyline through its cell centers.
+  for (const cor of level.corridors) {
+    const path = cor.path;
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i]!, b = path[i + 1]!;
+      positions.push(a[0] * CELL, a[1] * CELL, a[2] * CELL,
+                     b[0] * CELL, b[1] * CELL, b[2] * CELL);
+      colors.push(CORRIDOR_COLOR.r, CORRIDOR_COLOR.g, CORRIDOR_COLOR.b,
+                  CORRIDOR_COLOR.r, CORRIDOR_COLOR.g, CORRIDOR_COLOR.b);
     }
   }
 
@@ -57,18 +68,23 @@ function buildMapGeometry(level: Level) {
   return geo;
 }
 
-// Bounds across all cells, used to frame the map camera.
+// Bounds across all rooms + corridor cells, used to frame the map camera.
 function levelBounds(level: Level) {
   const box = new THREE.Box3();
-  for (const c of level.cells.values()) {
-    box.expandByPoint(new THREE.Vector3(c.x * CELL - HALF, c.y * CELL - HALF, c.z * CELL - HALF));
-    box.expandByPoint(new THREE.Vector3(c.x * CELL + HALF, c.y * CELL + HALF, c.z * CELL + HALF));
+  for (const r of level.rooms) {
+    box.expandByPoint(new THREE.Vector3(r.min[0] * CELL - HALF, r.min[1] * CELL - HALF, r.min[2] * CELL - HALF));
+    box.expandByPoint(new THREE.Vector3(r.max[0] * CELL + HALF, r.max[1] * CELL + HALF, r.max[2] * CELL + HALF));
+  }
+  for (const cor of level.corridors) {
+    for (const p of cor.path) {
+      box.expandByPoint(new THREE.Vector3(p[0] * CELL, p[1] * CELL, p[2] * CELL));
+    }
   }
   const center = new THREE.Vector3();
   box.getCenter(center);
   const size = new THREE.Vector3();
   box.getSize(size);
-  return { center, radius: size.length() / 2 };
+  return { center, radius: Math.max(40, size.length() / 2) };
 }
 
 function MapScene({ level, shipPos, shipQuat, robots, yaw, pitch, zoom }: {
@@ -256,12 +272,11 @@ export function MapView({ level, shipPos, shipQuat, robots, onClose }: Props) {
         {/* Legend */}
         <div className="pointer-events-none absolute bottom-4 left-4 rounded border border-cyan-400/30 bg-black/60 p-3 text-[11px] uppercase tracking-widest text-cyan-100/80">
           <Legend swatch="#66ff88" label="Your ship" />
-          <Legend swatch="#ff3344" label="Reactor" />
           <Legend swatch="#ffcc22" label="Robots" />
-          <Legend swatch="#3a8acc" label="Corridor" />
-          <Legend swatch="#ff8a3a" label="Hub" />
+          <Legend swatch="#ff3344" label="Reactor chamber" />
+          <Legend swatch="#ff8a3a" label="Hub room" />
           <Legend swatch="#7a55ff" label="Shaft" />
-          <Legend swatch="#ff3344" label="Reactor chamber" dim />
+          <Legend swatch="#3a8acc" label="Corridor" />
         </div>
       </div>
     </div>

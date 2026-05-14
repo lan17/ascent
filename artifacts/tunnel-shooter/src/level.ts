@@ -13,8 +13,23 @@ export type Cell = {
   kind: "corridor" | "hub" | "reactor" | "shaft";
 };
 
+export type Room = {
+  kind: "hub" | "reactor" | "shaft";
+  // Inclusive cell-coord AABB.
+  min: [number, number, number];
+  max: [number, number, number];
+  center: [number, number, number];
+};
+
+export type Corridor = {
+  // Ordered cell coords from one room boundary to another.
+  path: Array<[number, number, number]>;
+};
+
 export type Level = {
   cells: Map<CellKey, Cell>;
+  rooms: Room[];
+  corridors: Corridor[];
   start: THREE.Vector3;
   enemySpawns: THREE.Vector3[];
   reactor: THREE.Vector3;
@@ -41,11 +56,40 @@ const DIRS: Array<[number, number, number, keyof Cell["open"], keyof Cell["open"
   [0, 0, -1, "nz", "pz"],
 ];
 
-type Box = { x: number; y: number; z: number; sx: number; sy: number; sz: number; kind: Cell["kind"] };
+function makeRoom(
+  kind: Room["kind"],
+  x: number, y: number, z: number,
+  sx: number, sy: number, sz: number,
+): Room {
+  return {
+    kind,
+    min: [x, y, z],
+    max: [x + sx - 1, y + sy - 1, z + sz - 1],
+    center: [x + Math.floor(sx / 2), y + Math.floor(sy / 2), z + Math.floor(sz / 2)],
+  };
+}
+
+function roomContains(r: Room, x: number, y: number, z: number): boolean {
+  return (
+    x >= r.min[0] && x <= r.max[0] &&
+    y >= r.min[1] && y <= r.max[1] &&
+    z >= r.min[2] && z <= r.max[2]
+  );
+}
+
+function roomsOverlap(a: Room, b: Room, pad: number): boolean {
+  return (
+    a.min[0] - pad <= b.max[0] && a.max[0] + pad >= b.min[0] &&
+    a.min[1] - pad <= b.max[1] && a.max[1] + pad >= b.min[1] &&
+    a.min[2] - pad <= b.max[2] && a.max[2] + pad >= b.min[2]
+  );
+}
 
 export function generateLevel(seed = 1): Level {
   const rand = rng(seed);
   const cells = new Map<CellKey, Cell>();
+  const rooms: Room[] = [];
+  const corridors: Corridor[] = [];
 
   function add(x: number, y: number, z: number, kind: Cell["kind"] = "corridor"): Cell {
     const k = key(x, y, z);
@@ -53,11 +97,13 @@ export function generateLevel(seed = 1): Level {
     if (!c) {
       c = { x, y, z, open: { px: false, nx: false, py: false, ny: false, pz: false, nz: false }, kind };
       cells.set(k, c);
-    } else if (kind !== "corridor") {
+    } else if (kind !== "corridor" && c.kind === "corridor") {
+      // Upgrade corridor cells in-place if a room claims them later.
       c.kind = kind;
     }
     return c;
   }
+
   function connect(ax: number, ay: number, az: number, bx: number, by: number, bz: number) {
     const a = cells.get(key(ax, ay, az));
     const b = cells.get(key(bx, by, bz));
@@ -72,109 +118,218 @@ export function generateLevel(seed = 1): Level {
     }
   }
 
-  // 1) Place rooms: a starting hub, the reactor chamber, and a few mid hubs / shafts.
-  const rooms: Box[] = [];
-  // Starting hub at origin (2x1x2)
-  rooms.push({ x: -1, y: 0, z: -1, sx: 2, sy: 1, sz: 2, kind: "hub" });
-
-  // 3-5 intermediate hubs scattered in a region
-  const hubCount = 3 + Math.floor(rand() * 3);
-  for (let i = 0; i < hubCount; i++) {
-    const sx = 1 + Math.floor(rand() * 2); // 1..2
-    const sy = rand() < 0.4 ? 2 : 1;
-    const sz = 1 + Math.floor(rand() * 2);
-    const x = Math.floor((rand() - 0.5) * 12);
-    const y = Math.floor((rand() - 0.5) * 4);
-    const z = Math.floor((rand() - 0.5) * 12);
-    rooms.push({ x, y, z, sx, sy, sz, kind: rand() < 0.4 ? "shaft" : "hub" });
-  }
-
-  // Reactor chamber: 3x2x3, placed far from origin
-  const rdir = rand() * Math.PI * 2;
-  const rdist = 8 + Math.floor(rand() * 4);
-  const rx = Math.round(Math.cos(rdir) * rdist) - 1;
-  const rz = Math.round(Math.sin(rdir) * rdist) - 1;
-  const ry = Math.floor((rand() - 0.5) * 4);
-  rooms.push({ x: rx, y: ry, z: rz, sx: 3, sy: 2, sz: 3, kind: "reactor" });
-
-  // 2) Carve each room: all cells in box exist, internal faces are open.
-  for (const r of rooms) {
-    for (let ix = 0; ix < r.sx; ix++) {
-      for (let iy = 0; iy < r.sy; iy++) {
-        for (let iz = 0; iz < r.sz; iz++) {
-          add(r.x + ix, r.y + iy, r.z + iz, r.kind);
+  function carveRoom(r: Room) {
+    rooms.push(r);
+    for (let x = r.min[0]; x <= r.max[0]; x++) {
+      for (let y = r.min[1]; y <= r.max[1]; y++) {
+        for (let z = r.min[2]; z <= r.max[2]; z++) {
+          add(x, y, z, r.kind);
         }
       }
     }
-    // open internal connections
-    for (let ix = 0; ix < r.sx; ix++) {
-      for (let iy = 0; iy < r.sy; iy++) {
-        for (let iz = 0; iz < r.sz; iz++) {
-          if (ix + 1 < r.sx) connect(r.x + ix, r.y + iy, r.z + iz, r.x + ix + 1, r.y + iy, r.z + iz);
-          if (iy + 1 < r.sy) connect(r.x + ix, r.y + iy, r.z + iz, r.x + ix, r.y + iy + 1, r.z + iz);
-          if (iz + 1 < r.sz) connect(r.x + ix, r.y + iy, r.z + iz, r.x + ix, r.y + iy, r.z + iz + 1);
+    for (let x = r.min[0]; x <= r.max[0]; x++) {
+      for (let y = r.min[1]; y <= r.max[1]; y++) {
+        for (let z = r.min[2]; z <= r.max[2]; z++) {
+          if (x < r.max[0]) connect(x, y, z, x + 1, y, z);
+          if (y < r.max[1]) connect(x, y, z, x, y + 1, z);
+          if (z < r.max[2]) connect(x, y, z, x, y, z + 1);
         }
       }
     }
   }
 
-  // 3) Connect rooms with L-shaped corridors of single cells.
-  function roomCenter(r: Box): [number, number, number] {
-    return [r.x + Math.floor(r.sx / 2), r.y + Math.floor(r.sy / 2), r.z + Math.floor(r.sz / 2)];
-  }
-  function carveCorridor(ax: number, ay: number, az: number, bx: number, by: number, bz: number) {
-    // greedy axis-by-axis: x then y then z, in random order
-    const axes: Array<"x" | "y" | "z"> = ["x", "y", "z"];
-    for (let i = axes.length - 1; i > 0; i--) {
-      const j = Math.floor(rand() * (i + 1));
-      [axes[i], axes[j]] = [axes[j]!, axes[i]!];
+  function tryPlaceRoom(
+    kind: Room["kind"],
+    sx: number, sy: number, sz: number,
+    rx: [number, number], ry: [number, number], rz: [number, number],
+    pad: number,
+    attempts: number,
+  ): Room | null {
+    for (let t = 0; t < attempts; t++) {
+      const spanX = Math.max(1, rx[1] - rx[0] - sx + 1);
+      const spanY = Math.max(1, ry[1] - ry[0] - sy + 1);
+      const spanZ = Math.max(1, rz[1] - rz[0] - sz + 1);
+      const x = rx[0] + Math.floor(rand() * spanX);
+      const y = ry[0] + Math.floor(rand() * spanY);
+      const z = rz[0] + Math.floor(rand() * spanZ);
+      const r = makeRoom(kind, x, y, z, sx, sy, sz);
+      if (rooms.every((o) => !roomsOverlap(r, o, pad))) return r;
     }
-    let cx = ax, cy = ay, cz = az;
-    for (const ax2 of axes) {
-      const target = ax2 === "x" ? bx : ax2 === "y" ? by : bz;
-      const cur = ax2 === "x" ? cx : ax2 === "y" ? cy : cz;
-      const step = target > cur ? 1 : target < cur ? -1 : 0;
-      let safety = 0;
-      while ((ax2 === "x" ? cx : ax2 === "y" ? cy : cz) !== target && safety++ < 50) {
-        const nx = cx + (ax2 === "x" ? step : 0);
-        const ny = cy + (ax2 === "y" ? step : 0);
-        const nz = cz + (ax2 === "z" ? step : 0);
-        add(nx, ny, nz, "corridor");
-        // Ensure both endpoints exist before connecting
-        if (cells.get(key(cx, cy, cz))) connect(cx, cy, cz, nx, ny, nz);
-        cx = nx; cy = ny; cz = nz;
+    return null;
+  }
+
+  // ---- 1) Starting hub at origin (always reproducible spawn) ----
+  const startRoom = makeRoom("hub", -1, 0, -1, 2, 1, 2);
+  carveRoom(startRoom);
+
+  // ---- 2) Reactor chamber placed far away in a random direction ----
+  let reactorRoom: Room | null = null;
+  for (let t = 0; t < 120 && !reactorRoom; t++) {
+    const dir = rand() * Math.PI * 2;
+    const dist = 14 + Math.floor(rand() * 6); // 14..19
+    const cx = Math.round(Math.cos(dir) * dist) - 1;
+    const cz = Math.round(Math.sin(dir) * dist) - 1;
+    const cy = Math.floor((rand() - 0.5) * 4); // -2..1
+    const r = makeRoom("reactor", cx, cy, cz, 3, 2, 3);
+    if (rooms.every((o) => !roomsOverlap(r, o, 3))) reactorRoom = r;
+  }
+  if (!reactorRoom) {
+    reactorRoom = makeRoom("reactor", 14, 0, 14, 3, 2, 3);
+  }
+  carveRoom(reactorRoom);
+
+  // ---- 3) Mid rooms — varied sizes, in the corridor region between start and reactor ----
+  const midX: [number, number] = [
+    Math.min(startRoom.center[0], reactorRoom.center[0]) - 6,
+    Math.max(startRoom.center[0], reactorRoom.center[0]) + 6,
+  ];
+  const midZ: [number, number] = [
+    Math.min(startRoom.center[2], reactorRoom.center[2]) - 6,
+    Math.max(startRoom.center[2], reactorRoom.center[2]) + 6,
+  ];
+  const midY: [number, number] = [-3, 3];
+  const presets: Array<{ kind: Room["kind"]; sx: number; sy: number; sz: number }> = [
+    { kind: "hub",   sx: 2, sy: 1, sz: 2 },
+    { kind: "hub",   sx: 1, sy: 2, sz: 2 },
+    { kind: "hub",   sx: 2, sy: 2, sz: 1 },
+    { kind: "shaft", sx: 1, sy: 3, sz: 1 },
+    { kind: "shaft", sx: 1, sy: 4, sz: 1 },
+    { kind: "hub",   sx: 3, sy: 1, sz: 1 },
+    { kind: "hub",   sx: 1, sy: 1, sz: 3 },
+  ];
+  const midCount = 4 + Math.floor(rand() * 3); // 4..6
+  for (let i = 0; i < midCount; i++) {
+    const pre = presets[Math.floor(rand() * presets.length)]!;
+    const room = tryPlaceRoom(pre.kind, pre.sx, pre.sy, pre.sz, midX, midY, midZ, 2, 60);
+    if (room) carveRoom(room);
+  }
+
+  // ---- 4) Build a connectivity graph: MST + a couple of extra short edges for loops ----
+  type Edge = { i: number; j: number; d: number };
+  const allEdges: Edge[] = [];
+  for (let i = 0; i < rooms.length; i++) {
+    for (let j = i + 1; j < rooms.length; j++) {
+      const a = rooms[i]!.center;
+      const b = rooms[j]!.center;
+      const dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+      allEdges.push({ i, j, d: Math.sqrt(dx * dx + dy * dy + dz * dz) });
+    }
+  }
+  allEdges.sort((a, b) => a.d - b.d);
+
+  const parent = rooms.map((_, i) => i);
+  function find(i: number): number {
+    let r = i;
+    while (parent[r] !== r) r = parent[r]!;
+    let cur = i;
+    while (parent[cur] !== r) {
+      const nxt = parent[cur]!;
+      parent[cur] = r;
+      cur = nxt;
+    }
+    return r;
+  }
+  const usedEdges: Edge[] = [];
+  const usedKey = new Set<string>();
+  function eKey(e: Edge) { return `${e.i}-${e.j}`; }
+  for (const e of allEdges) {
+    const ri = find(e.i), rj = find(e.j);
+    if (ri !== rj) {
+      parent[ri] = rj;
+      usedEdges.push(e);
+      usedKey.add(eKey(e));
+    }
+  }
+  // Loop edges: 1..2 of the next-shortest unused edges.
+  const loopCount = 1 + Math.floor(rand() * 2);
+  let added = 0;
+  for (const e of allEdges) {
+    if (added >= loopCount) break;
+    if (usedKey.has(eKey(e))) continue;
+    usedEdges.push(e);
+    usedKey.add(eKey(e));
+    added++;
+  }
+
+  // ---- 5) Carve corridors for each edge, routing around other rooms when possible ----
+  function closestBoundaryCell(r: Room, target: [number, number, number]): [number, number, number] {
+    return [
+      Math.max(r.min[0], Math.min(r.max[0], target[0])),
+      Math.max(r.min[1], Math.min(r.max[1], target[1])),
+      Math.max(r.min[2], Math.min(r.max[2], target[2])),
+    ];
+  }
+  function routePath(
+    start: [number, number, number],
+    end: [number, number, number],
+    order: Array<"x" | "y" | "z">,
+  ): Array<[number, number, number]> {
+    const out: Array<[number, number, number]> = [[start[0], start[1], start[2]]];
+    let cx = start[0], cy = start[1], cz = start[2];
+    for (const ax of order) {
+      const target = ax === "x" ? end[0] : ax === "y" ? end[1] : end[2];
+      while ((ax === "x" ? cx : ax === "y" ? cy : cz) !== target) {
+        const cur = ax === "x" ? cx : ax === "y" ? cy : cz;
+        const step = target > cur ? 1 : -1;
+        if (ax === "x") cx += step;
+        else if (ax === "y") cy += step;
+        else cz += step;
+        out.push([cx, cy, cz]);
       }
     }
+    return out;
   }
-  // Connect each room to the next in order, plus a couple of extra cross-links.
-  for (let i = 0; i < rooms.length - 1; i++) {
-    const [ax, ay, az] = roomCenter(rooms[i]!);
-    const [bx, by, bz] = roomCenter(rooms[i + 1]!);
-    carveCorridor(ax, ay, az, bx, by, bz);
+  function countClips(
+    path: Array<[number, number, number]>,
+    a: Room, b: Room,
+  ): number {
+    let n = 0;
+    for (const p of path) {
+      for (const r of rooms) {
+        if (r === a || r === b) continue;
+        if (roomContains(r, p[0], p[1], p[2])) { n++; break; }
+      }
+    }
+    return n;
   }
-  for (let i = 0; i < 3; i++) {
-    const a = rooms[Math.floor(rand() * rooms.length)]!;
-    const b = rooms[Math.floor(rand() * rooms.length)]!;
-    if (a === b) continue;
-    const [ax, ay, az] = roomCenter(a);
-    const [bx, by, bz] = roomCenter(b);
-    carveCorridor(ax, ay, az, bx, by, bz);
+  const orderings: Array<["x" | "y" | "z", "x" | "y" | "z", "x" | "y" | "z"]> = [
+    ["x", "y", "z"], ["x", "z", "y"], ["y", "x", "z"],
+    ["y", "z", "x"], ["z", "x", "y"], ["z", "y", "x"],
+  ];
+  function carveCorridor(a: Room, b: Room) {
+    const sCell = closestBoundaryCell(a, b.center);
+    const eCell = closestBoundaryCell(b, a.center);
+    let best: { path: Array<[number, number, number]>; clips: number } | null = null;
+    for (const order of orderings) {
+      const p = routePath(sCell, eCell, order);
+      const clips = countClips(p, a, b);
+      if (!best || clips < best.clips) best = { path: p, clips };
+      if (clips === 0) break;
+    }
+    if (!best) return;
+    const path = best.path;
+    let prev: [number, number, number] | null = null;
+    for (const c of path) {
+      const [x, y, z] = c;
+      const insideSelf = roomContains(a, x, y, z) || roomContains(b, x, y, z);
+      if (!insideSelf) add(x, y, z, "corridor");
+      if (prev) connect(prev[0], prev[1], prev[2], x, y, z);
+      prev = c;
+    }
+    corridors.push({ path });
   }
 
-  // 4) Pick reactor location: center of the explicitly-marked reactor chamber.
-  const reactorRoom = rooms[rooms.length - 1]!;
-  const [rcx, rcy, rcz] = roomCenter(reactorRoom);
-  const reactor = new THREE.Vector3(rcx * CELL, rcy * CELL, rcz * CELL);
+  for (const e of usedEdges) carveCorridor(rooms[e.i]!, rooms[e.j]!);
 
-  // 5) Enemy spawns: spread through corridors and hubs (not start, not reactor cell).
+  // ---- 6) Reactor world position ----
+  const rc = reactorRoom.center;
+  const reactor = new THREE.Vector3(rc[0] * CELL, rc[1] * CELL, rc[2] * CELL);
+
+  // ---- 7) Enemy spawns: spread through corridor + hub cells, never start, never reactor chamber ----
   const enemySpawns: THREE.Vector3[] = [];
-  const cellList = Array.from(cells.values());
-  for (let i = 0; i < cellList.length; i++) {
-    const c = cellList[i]!;
+  for (const c of cells.values()) {
     if (c.x === 0 && c.y === 0 && c.z === 0) continue;
-    if (c.x === rcx && c.y === rcy && c.z === rcz) continue;
     if (c.kind === "reactor") continue;
-    // ~40% density, varied
     if (((c.x * 73 + c.y * 31 + c.z * 17) & 7) < 3) {
       enemySpawns.push(new THREE.Vector3(c.x * CELL, c.y * CELL, c.z * CELL));
     }
@@ -182,6 +337,8 @@ export function generateLevel(seed = 1): Level {
 
   return {
     cells,
+    rooms,
+    corridors,
     start: new THREE.Vector3(0, 0, 0),
     enemySpawns,
     reactor,
@@ -196,7 +353,6 @@ export function clampToLevel(level: Level, pos: THREE.Vector3, prev: THREE.Vecto
   const cz = Math.round(pos.z / CELL);
   const cell = level.cells.get(key(cx, cy, cz));
   if (!cell) {
-    // outside any cell: snap back to prev
     return prev.clone();
   }
   const localX = pos.x - cx * CELL;
