@@ -59,6 +59,7 @@ type SharedRefs = {
   paused: { current: boolean };
   shake: { current: number };
   contactCooldown: { current: number };
+  damageFlash: { current: number };
 };
 
 type ContactKind = "wall" | "robot" | "debris";
@@ -89,6 +90,7 @@ function registerContact(refs: SharedRefs, impact: number, kind: ContactKind) {
   if (refs.contactCooldown.current > 0) return;
   refs.contactCooldown.current = 0.2;
   let dmg = Math.min(30, Math.max(3, Math.round(over * CONTACT_DAMAGE_PER_UNIT[kind])));
+  const totalDamage = dmg;
   const hud = refs.hud.current;
   if (hud.shields > 0) {
     const absorbed = Math.min(hud.shields, dmg);
@@ -101,6 +103,7 @@ function registerContact(refs: SharedRefs, impact: number, kind: ContactKind) {
     hud.status = "dead";
     hud.message = "SHIP DESTROYED";
   }
+  refs.damageFlash.current = Math.min(1, refs.damageFlash.current + 0.25 + totalDamage * 0.03);
   refs.setHud({ ...hud });
 }
 
@@ -901,6 +904,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
             hud.status = "dead";
             hud.message = "SHIP DESTROYED";
           }
+          refs.damageFlash.current = Math.min(1, refs.damageFlash.current + 0.3 + L.damage * 0.03);
           refs.setHud({ ...hud });
           continue;
         }
@@ -1307,6 +1311,7 @@ function GameInner() {
       paused: pausedRef,
       shake: { current: 0 },
       contactCooldown: { current: 0 },
+      damageFlash: { current: 0 },
     };
   }, [level]);
 
@@ -1420,6 +1425,7 @@ function GameInner() {
     clearAllDebris(refs);
     refs.shake.current = 0;
     refs.contactCooldown.current = 0;
+    refs.damageFlash.current = 0;
     refs.robots.forEach((r, i) => {
       r.alive = true;
       r.hp = ROBOT_ARCHETYPES[r.kind].maxHp;
@@ -1488,6 +1494,7 @@ function GameInner() {
         state={hudState}
         onStart={startGame}
       />
+      <DamageFlash refs={refs} />
       {hudState.status === "playing" && !mapOpen && (
         <MiniRadar refs={refs} />
       )}
@@ -1736,6 +1743,40 @@ function MiniRadar({ refs }: { refs: SharedRefs }) {
     <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-orange-500/40 bg-black/40 shadow-lg">
       <canvas ref={canvasRef} width={180} height={180} className="block rounded-full" />
     </div>
+  );
+}
+
+function DamageFlash({ refs }: { refs: SharedRefs }) {
+  const elRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      // Fade ~0.2s decay: subtract ~5/sec so a full 1.0 flash dies in ~0.2s.
+      refs.damageFlash.current = Math.max(0, refs.damageFlash.current - dt * 5);
+      const el = elRef.current;
+      if (el) {
+        const v = refs.damageFlash.current;
+        el.style.opacity = v.toFixed(3);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [refs]);
+  return (
+    <div
+      ref={elRef}
+      className="pointer-events-none absolute inset-0"
+      style={{
+        opacity: 0,
+        background:
+          "radial-gradient(ellipse at center, rgba(255,0,0,0) 35%, rgba(255,20,20,0.55) 80%, rgba(255,0,0,0.85) 100%)",
+        mixBlendMode: "screen",
+      }}
+    />
   );
 }
 
