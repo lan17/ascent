@@ -52,12 +52,25 @@ export type Prop = {
   biome: "steel" | "tan" | "warning";
 };
 
+export type PickupKind = "shield_cell" | "ammo_core" | "score_chip";
+
+export type Pickup = {
+  kind: PickupKind;
+  // World-space position (hovering slightly above the floor).
+  pos: [number, number, number];
+  // Cell coord this pickup is anchored in.
+  cell: [number, number, number];
+  // Animation phase offset so neighbors don't bob/spin in lockstep.
+  phase: number;
+};
+
 export type Level = {
   cells: Map<CellKey, Cell>;
   rooms: Room[];
   corridors: Corridor[];
   props: Prop[];
   propsByCell: Map<CellKey, Prop[]>;
+  pickups: Pickup[];
   start: THREE.Vector3;
   enemySpawns: THREE.Vector3[];
   reactor: THREE.Vector3;
@@ -515,6 +528,105 @@ export function generateLevel(seed = 1): Level {
     }
   }
 
+  // ---- 6.5) Seed collectible pickups inside non-corridor rooms ----
+  // Deterministic placement, biased toward corner slots and slots adjacent
+  // to a placed prop, so circling each arena pays off. Reactor rooms get a
+  // slightly richer pool to reward the final push.
+  const pickups: Pickup[] = [];
+  const PICKUP_HOVER_Y = 2.4; // height above cell floor center
+  for (const room of rooms) {
+    if (room.kind === "shaft") continue;
+    const isReactor = room.kind === "reactor";
+
+    type Cand = {
+      pos: [number, number, number];
+      cell: [number, number, number];
+      score: number;
+    };
+    const cands: Cand[] = [];
+
+    for (let cx = room.min[0]; cx <= room.max[0]; cx++) {
+      for (let cy = room.min[1]; cy <= room.max[1]; cy++) {
+        for (let cz = room.min[2]; cz <= room.max[2]; cz++) {
+          const cell = cells.get(key(cx, cy, cz));
+          if (!cell) continue;
+          const cellProps = propsByCell.get(key(cx, cy, cz)) ?? [];
+
+          const isDoorFace = (face: keyof Cell["open"]): boolean => {
+            if (!cell.open[face]) return false;
+            let nx = cx, ny = cy, nz = cz;
+            if (face === "px") nx++; else if (face === "nx") nx--;
+            else if (face === "py") ny++; else if (face === "ny") ny--;
+            else if (face === "pz") nz++; else nz--;
+            return !roomContains(room, nx, ny, nz);
+          };
+
+          for (const slot of CELL_SLOTS) {
+            if (slot.needs.some((f) => isDoorFace(f))) continue;
+
+            const wx = cx * CELL + slot.lx;
+            const wy = cy * CELL - HALF + PICKUP_HOVER_Y;
+            const wz = cz * CELL + slot.lz;
+
+            // Reject if the pickup would sit inside a prop's AABB.
+            let inside = false;
+            let nearProp = false;
+            for (const pr of cellProps) {
+              const inX = Math.abs(wx - pr.pos[0]) < pr.half[0] + 0.5;
+              const inY = Math.abs(wy - pr.pos[1]) < pr.half[1] + 0.5;
+              const inZ = Math.abs(wz - pr.pos[2]) < pr.half[2] + 0.5;
+              if (inX && inY && inZ) { inside = true; break; }
+              const dxp = wx - pr.pos[0], dzp = wz - pr.pos[2];
+              if (dxp * dxp + dzp * dzp < 6.5 * 6.5) nearProp = true;
+            }
+            if (inside) continue;
+
+            const cornerBias = slot.needs.length === 2 ? 2.2 : 0.6;
+            const propBias = nearProp ? 1.6 : 0;
+            cands.push({
+              pos: [wx, wy, wz],
+              cell: [cx, cy, cz],
+              score: cornerBias + propBias + rand() * 0.4,
+            });
+          }
+        }
+      }
+    }
+
+    cands.sort((a, b) => b.score - a.score);
+
+    // 1..3 pickups (reactor 2..4). Both clamped by the candidate pool.
+    const minN = isReactor ? 2 : 1;
+    const maxN = isReactor ? 4 : 3;
+    const want = minN + Math.floor(rand() * (maxN - minN + 1));
+
+    const pool: PickupKind[] = isReactor
+      ? ["shield_cell", "shield_cell", "ammo_core", "ammo_core", "score_chip", "score_chip"]
+      : ["shield_cell", "ammo_core", "score_chip", "score_chip"];
+
+    const chosen: Pickup[] = [];
+    for (const c of cands) {
+      if (chosen.length >= want) break;
+      // Don't crowd two pickups too close — keep arenas exploration-worthy.
+      let crowded = false;
+      for (const e of chosen) {
+        const dxe = e.pos[0] - c.pos[0];
+        const dye = e.pos[1] - c.pos[1];
+        const dze = e.pos[2] - c.pos[2];
+        if (dxe * dxe + dye * dye + dze * dze < 6.0 * 6.0) { crowded = true; break; }
+      }
+      if (crowded) continue;
+      const kind = pool[Math.floor(rand() * pool.length)]!;
+      chosen.push({
+        kind,
+        pos: c.pos,
+        cell: c.cell,
+        phase: rand() * Math.PI * 2,
+      });
+    }
+    for (const p of chosen) pickups.push(p);
+  }
+
   // ---- 7) Reactor world position ----
   const rc = reactorRoom.center;
   const reactor = new THREE.Vector3(rc[0] * CELL, rc[1] * CELL, rc[2] * CELL);
@@ -559,6 +671,7 @@ export function generateLevel(seed = 1): Level {
     corridors,
     props,
     propsByCell,
+    pickups,
     start: new THREE.Vector3(0, 0, 0),
     enemySpawns,
     reactor,

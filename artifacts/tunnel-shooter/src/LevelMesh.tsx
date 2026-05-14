@@ -1,7 +1,12 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { CELL, HALF, type Cell, type Level, type Prop, type PropKind } from "./level";
+import { CELL, HALF, type Cell, type Level, type Pickup, type PickupKind, type Prop, type PropKind } from "./level";
+
+export type PickupRuntime = {
+  pickup: Pickup;
+  active: boolean;
+};
 
 type Props = { level: Level };
 
@@ -746,6 +751,87 @@ function PropMesh({ p }: { p: Prop }) {
       );
     }
   }
+}
+
+// ---------- Pickups ----------
+// Small floating collectibles tucked behind props in non-corridor rooms.
+// Shared geometry/material per kind; per-frame hover + spin and visibility
+// driven by the runtime "active" flag mutated by Game.tsx on collection.
+
+const PICKUP_GEOS: Record<PickupKind, THREE.BufferGeometry> = {
+  shield_cell: new THREE.IcosahedronGeometry(0.55, 0),
+  ammo_core:   new THREE.CylinderGeometry(0.35, 0.35, 0.9, 10),
+  score_chip:  new THREE.TorusGeometry(0.55, 0.16, 8, 18),
+};
+
+const PICKUP_COLORS: Record<PickupKind, { color: string; emissive: string }> = {
+  shield_cell: { color: "#aaeaff", emissive: "#33aaff" },
+  ammo_core:   { color: "#ffd28a", emissive: "#ff8a22" },
+  score_chip:  { color: "#bfffd6", emissive: "#33ff88" },
+};
+
+const PICKUP_MATS: Record<PickupKind, THREE.MeshStandardMaterial> =
+  (Object.keys(PICKUP_COLORS) as PickupKind[]).reduce((acc, k) => {
+    const c = PICKUP_COLORS[k];
+    acc[k] = new THREE.MeshStandardMaterial({
+      color: c.color, emissive: c.emissive, emissiveIntensity: 2.6,
+      metalness: 0.6, roughness: 0.25, toneMapped: false,
+    });
+    return acc;
+  }, {} as Record<PickupKind, THREE.MeshStandardMaterial>);
+
+const PICKUP_HALO_GEO = new THREE.SphereGeometry(0.85, 10, 10);
+const PICKUP_HALO_MATS: Record<PickupKind, THREE.MeshBasicMaterial> =
+  (Object.keys(PICKUP_COLORS) as PickupKind[]).reduce((acc, k) => {
+    acc[k] = new THREE.MeshBasicMaterial({
+      color: PICKUP_COLORS[k].emissive,
+      transparent: true, opacity: 0.18, depthWrite: false,
+      blending: THREE.AdditiveBlending, toneMapped: false,
+    });
+    return acc;
+  }, {} as Record<PickupKind, THREE.MeshBasicMaterial>);
+
+export function Pickups({ runtime }: { runtime: PickupRuntime[] }) {
+  const groupRefs = useRef<(THREE.Group | null)[]>([]);
+
+  useFrame((state) => {
+    const t = state.clock.elapsedTime;
+    for (let i = 0; i < runtime.length; i++) {
+      const r = runtime[i]!;
+      const g = groupRefs.current[i];
+      if (!g) continue;
+      if (!r.active) {
+        if (g.visible) g.visible = false;
+        continue;
+      }
+      if (!g.visible) g.visible = true;
+      const tt = t + r.pickup.phase;
+      g.position.set(
+        r.pickup.pos[0],
+        r.pickup.pos[1] + Math.sin(tt * 2.2) * 0.35,
+        r.pickup.pos[2],
+      );
+      g.rotation.y = tt * 1.8;
+      g.rotation.x = Math.sin(tt * 1.3) * 0.25;
+    }
+  });
+
+  return (
+    <>
+      {runtime.map((r, i) => (
+        <group key={i} ref={(el) => { groupRefs.current[i] = el; }}>
+          <mesh
+            geometry={PICKUP_GEOS[r.pickup.kind]}
+            material={PICKUP_MATS[r.pickup.kind]}
+          />
+          <mesh
+            geometry={PICKUP_HALO_GEO}
+            material={PICKUP_HALO_MATS[r.pickup.kind]}
+          />
+        </group>
+      ))}
+    </>
+  );
 }
 
 function Reactor({ pos }: { pos: THREE.Vector3 }) {

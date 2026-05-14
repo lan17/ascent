@@ -3,7 +3,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { EffectComposer, Bloom, Vignette, ChromaticAberration } from "@react-three/postprocessing";
 import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
-import { LevelMesh } from "./LevelMesh";
+import { LevelMesh, Pickups, type PickupRuntime } from "./LevelMesh";
 import { MapView } from "./MapView";
 import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, resolveShipProps, CELL, HALF, type Level } from "./level";
 import {
@@ -46,6 +46,8 @@ type SharedRefs = {
   robots: Robot[];
   explosions: Explosion[];
   debris: Debris[];
+  pickups: PickupRuntime[];
+  fireRateBoost: { current: number };
   level: Level;
   setHud: React.Dispatch<React.SetStateAction<GameState>>;
   hud: React.MutableRefObject<GameState>;
@@ -61,6 +63,14 @@ type SharedRefs = {
   contactCooldown: { current: number };
   damageFlash: { current: number };
 };
+
+// Tunable rewards / radii for pickups.
+const PICKUP_RADIUS = 1.6;
+const PICKUP_SHIELD_RESTORE = 35;
+const PICKUP_SCORE_VALUE = 150;
+const PICKUP_BOOST_DURATION = 5.0; // seconds
+const FIRE_COOLDOWN_NORMAL = 0.16;
+const FIRE_COOLDOWN_BOOSTED = 0.07;
 
 type ContactKind = "wall" | "robot" | "debris";
 
@@ -490,7 +500,9 @@ function ShipController({ refs }: { refs: SharedRefs }) {
     // --- Fire ---
     fireCooldown.current -= d;
     if ((k.has("Space") || refs.mouse.firing) && fireCooldown.current <= 0) {
-      fireCooldown.current = 0.16;
+      fireCooldown.current = refs.fireRateBoost.current > 0
+        ? FIRE_COOLDOWN_BOOSTED
+        : FIRE_COOLDOWN_NORMAL;
       // fwd = (0,0,-1) rotated by q
       _vu.set(0, 0, -1).applyQuaternion(q);
       // base = shipPos + (-0.3)*localY + 1.5*fwd
@@ -863,6 +875,45 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
     if (refs.hud.current.status !== "playing") return;
     if (refs.paused.current) return;
     const d = Math.min(dt, 0.05);
+
+    // --- Pickups: tick boost timer, collect any the ship flies through ---
+    if (refs.fireRateBoost.current > 0) {
+      refs.fireRateBoost.current = Math.max(0, refs.fireRateBoost.current - d);
+    }
+    const pickups = refs.pickups;
+    let hudChanged = false;
+    for (let i = 0; i < pickups.length; i++) {
+      const p = pickups[i]!;
+      if (!p.active) continue;
+      const px = p.pickup.pos[0], py = p.pickup.pos[1], pz = p.pickup.pos[2];
+      const ddx = px - refs.shipPos.x;
+      const ddy = py - refs.shipPos.y;
+      const ddz = pz - refs.shipPos.z;
+      const distSq = ddx * ddx + ddy * ddy + ddz * ddz;
+      const reach = PICKUP_RADIUS + 0.7; // ship sphere radius
+      if (distSq >= reach * reach) continue;
+
+      p.active = false;
+      _vt.set(px, py, pz);
+      spawnExplosion(refs, _vt, "spark");
+
+      const hud = refs.hud.current;
+      switch (p.pickup.kind) {
+        case "shield_cell":
+          hud.shields = Math.min(100, hud.shields + PICKUP_SHIELD_RESTORE);
+          break;
+        case "score_chip":
+          hud.score += PICKUP_SCORE_VALUE;
+          break;
+        case "ammo_core":
+          // Refresh the boost (don't stack past the full duration).
+          refs.fireRateBoost.current = PICKUP_BOOST_DURATION;
+          break;
+      }
+      hudChanged = true;
+    }
+    if (hudChanged) refs.setHud({ ...refs.hud.current });
+
 
     // Integrate debris (kinematic): move, dampen, bounce off level walls and
     // the ship. Hard ship-vs-debris contacts deal contact damage via
@@ -1364,6 +1415,10 @@ function GameInner() {
         bornAt: 0,
       });
     }
+    const pickups: PickupRuntime[] = level.pickups.map((pk) => ({
+      pickup: pk,
+      active: true,
+    }));
     return {
       shipPos: level.start.clone(),
       shipQuat: new THREE.Quaternion(),
@@ -1372,6 +1427,8 @@ function GameInner() {
       robots,
       explosions,
       debris,
+      pickups,
+      fireRateBoost: { current: 0 },
       level,
       setHud: setHudState,
       hud: hudRef,
@@ -1495,6 +1552,8 @@ function GameInner() {
     refs.shake.current = 0;
     refs.contactCooldown.current = 0;
     refs.damageFlash.current = 0;
+    refs.fireRateBoost.current = 0;
+    for (let i = 0; i < refs.pickups.length; i++) refs.pickups[i]!.active = true;
     refs.robots.forEach((r, i) => {
       r.alive = true;
       r.hp = ROBOT_ARCHETYPES[r.kind].maxHp;
@@ -1534,6 +1593,7 @@ function GameInner() {
         <ambientLight intensity={0.45} color="#5a4a55" />
         <hemisphereLight args={["#a06840", "#1a1820", 0.6]} />
         <LevelMesh level={level} />
+        <Pickups runtime={refs.pickups} />
         <DustField />
         <ShipController refs={refs} />
         <ShipBody refs={refs} />
