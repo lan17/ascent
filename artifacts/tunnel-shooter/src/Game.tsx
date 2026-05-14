@@ -5,6 +5,7 @@ import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh, Pickups, type PickupRuntime } from "./LevelMesh";
 import { getSlackFaceAtlas, type FaceAtlas } from "./slackFaceAtlas";
+import { TouchControls, type TouchInput } from "./TouchControls";
 import { MapView } from "./MapView";
 import { bfsNextStep, clampToLevel, destroyProp, generateLevel, isPropDestructible, key, losAxisAligned, neighborCells, resolveShipProps, CELL, HALF, type Level, type PickupKind } from "./level";
 import {
@@ -73,7 +74,46 @@ type SharedRefs = {
   shake: { current: number };
   contactCooldown: { current: number };
   damageFlash: { current: number };
+  touch: TouchInput;
+  autoFire: { current: boolean };
 };
+
+// ---------- Control scheme settings ----------
+export type ControlMode = "auto" | "kbm" | "touch";
+export type EffectiveMode = "kbm" | "touch";
+export type Settings = { mode: ControlMode; autoFire: boolean };
+
+const SETTINGS_KEY = "deepmine.settings.v1";
+
+function loadSettings(): Settings {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(SETTINGS_KEY) : null;
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<Settings>;
+      const mode: ControlMode = p.mode === "kbm" || p.mode === "touch" || p.mode === "auto" ? p.mode : "auto";
+      const autoFire = typeof p.autoFire === "boolean" ? p.autoFire : true;
+      return { mode, autoFire };
+    }
+  } catch { /* ignore */ }
+  return { mode: "auto", autoFire: true };
+}
+
+function saveSettings(s: Settings) {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+}
+
+function detectTouchCapable(): boolean {
+  if (typeof window === "undefined") return false;
+  const coarse = window.matchMedia?.("(pointer: coarse)").matches ?? false;
+  const hasTouch = (navigator.maxTouchPoints ?? 0) > 0 || "ontouchstart" in window;
+  return coarse && hasTouch;
+}
+
+function resolveEffectiveMode(mode: ControlMode, isTouchCapable: boolean): EffectiveMode {
+  if (mode === "kbm") return "kbm";
+  if (mode === "touch") return "touch";
+  return isTouchCapable ? "touch" : "kbm";
+}
 
 // Tunable rewards / radii for pickups.
 const PICKUP_RADIUS = 1.6;
@@ -411,26 +451,42 @@ function ShipController({ refs }: { refs: SharedRefs }) {
     _vy.set(0, 1, 0).applyQuaternion(q);
     _vz.set(0, 0, 1).applyQuaternion(q);
 
-    // Mouse pitch/yaw
+    // Mouse pitch/yaw (skipped in touch mode so finger drags don't inject yaw).
     let yaw = 0;
     let pitch = 0;
-    if (refs.mouse.locked) {
-      const sens = 0.0025;
-      yaw = -refs.mouse.dx * sens;
-      pitch = -refs.mouse.dy * sens;
-      refs.mouse.dx = 0;
-      refs.mouse.dy = 0;
-    } else {
-      const DEAD = 0.08;
-      const MAX_RATE = 2.2;
-      const applyAxis = (v: number) => {
+    if (!refs.touch.active) {
+      if (refs.mouse.locked) {
+        const sens = 0.0025;
+        yaw = -refs.mouse.dx * sens;
+        pitch = -refs.mouse.dy * sens;
+        refs.mouse.dx = 0;
+        refs.mouse.dy = 0;
+      } else {
+        const DEAD = 0.08;
+        const MAX_RATE = 2.2;
+        const applyAxis = (v: number) => {
+          const m = Math.abs(v);
+          if (m < DEAD) return 0;
+          const t = (m - DEAD) / (1 - DEAD);
+          return Math.sign(v) * t * t * MAX_RATE * d;
+        };
+        yaw = -applyAxis(refs.mouse.aimX);
+        pitch = -applyAxis(refs.mouse.aimY);
+      }
+    }
+
+    // Touch right-stick → yaw/pitch (rate-based with dead zone + exponential curve).
+    if (refs.touch.active) {
+      const T_DEAD = 0.08;
+      const T_RATE = 2.6;
+      const tCurve = (v: number) => {
         const m = Math.abs(v);
-        if (m < DEAD) return 0;
-        const t = (m - DEAD) / (1 - DEAD);
-        return Math.sign(v) * t * t * MAX_RATE * d;
+        if (m < T_DEAD) return 0;
+        const t = (m - T_DEAD) / (1 - T_DEAD);
+        return Math.sign(v) * t * t * T_RATE * d;
       };
-      yaw = -applyAxis(refs.mouse.aimX);
-      pitch = -applyAxis(refs.mouse.aimY);
+      yaw += -tCurve(refs.touch.lookX);
+      pitch += -tCurve(refs.touch.lookY);
     }
 
     // Keyboard pitch/yaw
@@ -459,6 +515,20 @@ function ShipController({ refs }: { refs: SharedRefs }) {
     if (k.has("KeyS")) _vt.addScaledVector(shift ? _vy : _vz, shift ? -1 : 1);
     if (k.has("KeyA")) _vt.addScaledVector(_vx, -1);
     if (k.has("KeyD")) _vt.addScaledVector(_vx, 1);
+    // Touch left-stick → strafe X + forward/back (Y up = forward thrust).
+    if (refs.touch.active) {
+      const T_DEAD = 0.12;
+      const tShape = (v: number) => {
+        const m = Math.abs(v);
+        if (m < T_DEAD) return 0;
+        const t = (m - T_DEAD) / (1 - T_DEAD);
+        return Math.sign(v) * t;
+      };
+      _vt.addScaledVector(_vx, tShape(refs.touch.moveX));
+      // moveY is positive when finger is below origin; +_vz is "back" (KeyS),
+      // -_vz is "forward" (KeyW). So pushing the stick UP gives forward thrust.
+      _vt.addScaledVector(_vz, tShape(refs.touch.moveY));
+    }
     if (_vt.lengthSq() > 0) _vt.normalize().multiplyScalar(accel);
     refs.shipVel.addScaledVector(_vt, d);
 
@@ -589,7 +659,12 @@ function ShipController({ refs }: { refs: SharedRefs }) {
 
     // --- Fire ---
     fireCooldown.current -= d;
-    if ((k.has("Space") || refs.mouse.firing) && fireCooldown.current <= 0) {
+    const fireHeld =
+      k.has("Space") ||
+      refs.mouse.firing ||
+      refs.touch.firing ||
+      (refs.touch.active && refs.autoFire.current);
+    if (fireHeld && fireCooldown.current <= 0) {
       fireCooldown.current = refs.fireRateBoost.current > 0
         ? FIRE_COOLDOWN_BOOSTED
         : FIRE_COOLDOWN_NORMAL;
@@ -1813,8 +1888,12 @@ function GameInner() {
   const [mapOpen, setMapOpen] = useState(false);
   const mapOpenRef = useRef(false);
   mapOpenRef.current = mapOpen;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<Settings>(() => loadSettings());
+  const isTouchCapable = useMemo(() => detectTouchCapable(), []);
+  const effectiveMode: EffectiveMode = resolveEffectiveMode(settings.mode, isTouchCapable);
   const pausedRef = useRef(false);
-  pausedRef.current = mapOpen;
+  pausedRef.current = mapOpen || settingsOpen;
 
   const level = useMemo(() => generateLevel(Math.floor(Math.random() * 99999) + 1), []);
 
@@ -1903,12 +1982,21 @@ function GameInner() {
       shake: { current: 0 },
       contactCooldown: { current: 0 },
       damageFlash: { current: 0 },
+      touch: { active: false, lookX: 0, lookY: 0, moveX: 0, moveY: 0, firing: false },
+      autoFire: { current: true },
     };
   }, [level]);
 
   useEffect(() => {
     setHudState((s) => ({ ...s, enemiesLeft: refs.robots.length }));
   }, [refs]);
+
+  // Persist + propagate settings into refs so the game loop can read them
+  // without re-rendering.
+  useEffect(() => {
+    saveSettings(settings);
+    refs.autoFire.current = settings.autoFire;
+  }, [refs, settings]);
 
   // Single source of truth for opening/closing the map. Always clears input
   // state on both edges (open and close) so held keys / pending mouse delta
@@ -2042,6 +2130,7 @@ function GameInner() {
     <div
       className="absolute inset-0"
       onClick={() => {
+        if (effectiveMode === "touch") return;
         if (hudRef.current.status !== "playing" || mapOpenRef.current) return;
         if (document.pointerLockElement) return;
         const el = document.querySelector("canvas") as HTMLCanvasElement | null;
@@ -2091,6 +2180,9 @@ function GameInner() {
       <Hud
         state={hudState}
         onStart={startGame}
+        effectiveMode={effectiveMode}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onToggleMap={() => setMapOpenWithReset((m) => !m)}
       />
       <DamageFlash refs={refs} />
       {hudState.status === "playing" && (
@@ -2109,6 +2201,89 @@ function GameInner() {
           onClose={() => setMapOpenWithReset(false)}
         />
       )}
+      <TouchControls
+        visible={effectiveMode === "touch" && hudState.status === "playing" && !mapOpen && !settingsOpen}
+        autoFire={settings.autoFire}
+        touch={refs.touch}
+      />
+      {settingsOpen && (
+        <SettingsPanel
+          settings={settings}
+          isTouchCapable={isTouchCapable}
+          onChange={setSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function SettingsPanel({
+  settings,
+  isTouchCapable,
+  onChange,
+  onClose,
+}: {
+  settings: Settings;
+  isTouchCapable: boolean;
+  onChange: (s: Settings) => void;
+  onClose: () => void;
+}) {
+  const modes: Array<{ id: ControlMode; label: string; sub: string }> = [
+    { id: "auto", label: "Auto", sub: isTouchCapable ? "Detected: Touch" : "Detected: Mouse + Keyboard" },
+    { id: "kbm", label: "Mouse + Keyboard", sub: "WASD · Mouse · Click" },
+    { id: "touch", label: "Touch", sub: "Twin virtual sticks" },
+  ];
+  return (
+    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur">
+      <div className="w-[min(28rem,92vw)] rounded border border-orange-400/40 bg-black/80 p-5 text-orange-200">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-bold uppercase tracking-[0.25em] text-orange-300">Settings</h2>
+          <button
+            onClick={onClose}
+            className="rounded border border-orange-400/40 px-2 py-1 text-xs uppercase tracking-widest hover:bg-orange-500/20"
+          >
+            Close
+          </button>
+        </div>
+        <div className="mb-5">
+          <div className="mb-2 text-[11px] uppercase tracking-widest text-orange-200/70">Control Scheme</div>
+          <div className="grid gap-2">
+            {modes.map((m) => {
+              const active = settings.mode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => onChange({ ...settings, mode: m.id })}
+                  className={
+                    "flex items-center justify-between rounded border px-3 py-2 text-left text-sm transition " +
+                    (active
+                      ? "border-orange-400 bg-orange-500/20 text-orange-50"
+                      : "border-orange-400/30 bg-black/40 hover:bg-orange-500/10")
+                  }
+                >
+                  <span className="font-semibold uppercase tracking-widest">{m.label}</span>
+                  <span className="text-[10px] uppercase tracking-widest text-orange-200/60">{m.sub}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="mb-2">
+          <div className="mb-2 text-[11px] uppercase tracking-widest text-orange-200/70">Auto-Fire (touch)</div>
+          <button
+            onClick={() => onChange({ ...settings, autoFire: !settings.autoFire })}
+            className={
+              "w-full rounded border px-3 py-2 text-sm uppercase tracking-widest transition " +
+              (settings.autoFire
+                ? "border-emerald-400 bg-emerald-500/20 text-emerald-50"
+                : "border-orange-400/40 bg-black/40 hover:bg-orange-500/10")
+            }
+          >
+            {settings.autoFire ? "On — auto-fire while moving" : "Off — tap fire button"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2522,9 +2697,38 @@ function DamageFlash({ refs }: { refs: SharedRefs }) {
   );
 }
 
-function Hud({ state, onStart }: { state: GameState; onStart: () => void }) {
+function Hud({
+  state, onStart, effectiveMode, onOpenSettings, onToggleMap,
+}: {
+  state: GameState;
+  onStart: () => void;
+  effectiveMode: EffectiveMode;
+  onOpenSettings: () => void;
+  onToggleMap: () => void;
+}) {
   return (
     <div className="pointer-events-none absolute inset-0 flex flex-col">
+      {/* Top-right utility buttons: settings always, map only while playing. */}
+      <div className="pointer-events-none absolute right-3 top-3 z-40 flex gap-2">
+        {state.status === "playing" && effectiveMode === "touch" && (
+          <button
+            onClick={onToggleMap}
+            data-touch-passthrough
+            className="pointer-events-auto rounded border border-orange-400/50 bg-black/60 px-3 py-2 text-[11px] font-bold uppercase tracking-widest text-orange-200 backdrop-blur hover:bg-orange-500/20"
+          >
+            Map
+          </button>
+        )}
+        <button
+          onClick={onOpenSettings}
+          data-touch-passthrough
+          aria-label="Settings"
+          className="pointer-events-auto rounded border border-orange-400/50 bg-black/60 px-3 py-2 text-[11px] font-bold uppercase tracking-widest text-orange-200 backdrop-blur hover:bg-orange-500/20"
+        >
+          ⚙ Settings
+        </button>
+      </div>
+
       {state.status === "playing" && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="relative h-10 w-10">
@@ -2574,7 +2778,7 @@ function Hud({ state, onStart }: { state: GameState; onStart: () => void }) {
             Six degrees of freedom. Hostile robots. One reactor.
             Destroy every bot, blow the reactor, and get out.
           </p>
-          <Controls />
+          <Controls mode={effectiveMode} />
           <Button onClick={onStart}>LAUNCH SHIP</Button>
           <p className="mt-4 text-[10px] uppercase tracking-widest text-orange-200/50">
             Original game inspired by classic 6DOF tunnel shooters.
@@ -2622,7 +2826,7 @@ function Button({ onClick, children }: { onClick: () => void; children: React.Re
   );
 }
 
-function Controls() {
+function Controls({ mode }: { mode: EffectiveMode }) {
   const Row = ({ k, label }: { k: string; label: string }) => (
     <div className="flex items-center justify-between gap-4 text-xs">
       <span className="rounded border border-orange-400/40 bg-black/60 px-2 py-1 font-mono text-orange-200">
@@ -2631,6 +2835,18 @@ function Controls() {
       <span className="text-orange-200/80">{label}</span>
     </div>
   );
+  if (mode === "touch") {
+    return (
+      <div className="mb-6 grid grid-cols-1 gap-y-2 rounded border border-orange-400/30 bg-black/40 p-4 sm:grid-cols-2 sm:gap-x-8">
+        <Row k="Left stick" label="Thrust + strafe" />
+        <Row k="Right stick" label="Pitch & yaw" />
+        <Row k="Auto-fire" label="Constant lasers (toggle in Settings)" />
+        <Row k="Fire button" label="Manual fire (auto-fire off)" />
+        <Row k="Map button" label="Toggle automap" />
+        <Row k="⚙ Settings" label="Switch control scheme" />
+      </div>
+    );
+  }
   return (
     <div className="mb-6 grid grid-cols-2 gap-x-8 gap-y-2 rounded border border-orange-400/30 bg-black/40 p-4">
       <Row k="W / S" label="Thrust fwd / back" />
