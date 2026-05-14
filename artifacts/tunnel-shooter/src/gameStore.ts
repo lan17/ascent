@@ -6,6 +6,7 @@ export type Laser = {
   vel: THREE.Vector3;
   life: number;
   hostile: boolean;
+  active: boolean;
 };
 
 export type Robot = {

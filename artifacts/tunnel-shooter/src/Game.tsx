@@ -19,24 +19,81 @@ type SharedRefs = {
   hud: React.MutableRefObject<GameState>;
   keys: Set<string>;
   mouse: {
-    dx: number; dy: number; // relative movement (used when pointer-locked)
-    aimX: number; aimY: number; // -1..1 offset from canvas center (used when free)
+    dx: number; dy: number;
+    aimX: number; aimY: number;
     locked: boolean;
     firing: boolean;
   };
 };
 
-let nextLaserId = 1;
-let nextRobotId = 1;
+// ---------- Module-scope scratch (no per-frame allocation in hot paths) ----------
+const _vx = new THREE.Vector3();
+const _vy = new THREE.Vector3();
+const _vz = new THREE.Vector3();
+const _vt = new THREE.Vector3();
+const _vu = new THREE.Vector3();
+const _vBase = new THREE.Vector3();
+const _vTarget = new THREE.Vector3();
+const _vPrev = new THREE.Vector3();
+const _vDiff = new THREE.Vector3();
+const _quatA = new THREE.Quaternion();
+
+// ---------- Pool sizing ----------
+const LASER_POOL_SIZE = 64;
+
+// ---------- Shared geometries / materials ----------
+const LASER_CORE_GEO = new THREE.CylinderGeometry(0.08, 0.08, 1.8, 6);
+const LASER_HALO_GEO = new THREE.CylinderGeometry(0.28, 0.28, 1.8, 6);
+
+const LASER_CORE_MAT_FRIENDLY = new THREE.MeshBasicMaterial({ color: "#ffaaaa", toneMapped: false });
+const LASER_CORE_MAT_HOSTILE = new THREE.MeshBasicMaterial({ color: "#88ffaa", toneMapped: false });
+const LASER_HALO_MAT_FRIENDLY = new THREE.MeshBasicMaterial({
+  color: "#ff3a55", transparent: true, opacity: 0.55,
+  blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+});
+const LASER_HALO_MAT_HOSTILE = new THREE.MeshBasicMaterial({
+  color: "#33ff88", transparent: true, opacity: 0.55,
+  blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+});
+
+const ROBOT_HULL_GEO = new THREE.OctahedronGeometry(1.4, 0);
+const ROBOT_BELT_GEO = new THREE.TorusGeometry(1.05, 0.18, 8, 16);
+const ROBOT_RING_GEO = new THREE.TorusGeometry(1.7, 0.05, 6, 32);
+const ROBOT_EYE_GEO = new THREE.SphereGeometry(0.5, 16, 16);
+const ROBOT_HALO_GEO = new THREE.SphereGeometry(0.85, 12, 12);
+
+const ROBOT_HULL_MAT = new THREE.MeshStandardMaterial({
+  color: "#7a8392", emissive: "#0a1018", emissiveIntensity: 0.4,
+  metalness: 0.85, roughness: 0.35, flatShading: true,
+});
+const ROBOT_BELT_MAT = new THREE.MeshStandardMaterial({
+  color: "#3a3540", metalness: 0.95, roughness: 0.25, flatShading: true,
+});
+const ROBOT_RING_MAT = new THREE.MeshStandardMaterial({
+  color: "#33ff88", emissive: "#33ff88", emissiveIntensity: 2.2, toneMapped: false,
+});
+const ROBOT_HALO_MAT = new THREE.MeshBasicMaterial({
+  color: "#33ff88", transparent: true, opacity: 0.18,
+  blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+});
+
+const SHIP_RING_GEO = new THREE.RingGeometry(0.08, 0.1, 24);
+const SHIP_RING_MAT = new THREE.MeshBasicMaterial({
+  color: "#ff7a2e", transparent: true, opacity: 0.7, side: THREE.DoubleSide,
+});
 
 function spawnLaser(refs: SharedRefs, pos: THREE.Vector3, dir: THREE.Vector3, hostile: boolean) {
-  refs.lasers.push({
-    id: nextLaserId++,
-    pos: pos.clone(),
-    vel: dir.clone().normalize().multiplyScalar(hostile ? 60 : 110),
-    life: 2.0,
-    hostile,
-  });
+  const pool = refs.lasers;
+  for (let i = 0; i < pool.length; i++) {
+    const L = pool[i]!;
+    if (L.active) continue;
+    L.active = true;
+    L.hostile = hostile;
+    L.life = 2.0;
+    L.pos.copy(pos);
+    L.vel.copy(dir).normalize().multiplyScalar(hostile ? 60 : 110);
+    return;
+  }
 }
 
 function ShipController({ refs }: { refs: SharedRefs }) {
@@ -49,36 +106,33 @@ function ShipController({ refs }: { refs: SharedRefs }) {
 
     // --- Orientation ---
     const q = refs.shipQuat;
-    const localX = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
-    const localY = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
-    const localZ = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+    _vx.set(1, 0, 0).applyQuaternion(q);
+    _vy.set(0, 1, 0).applyQuaternion(q);
+    _vz.set(0, 0, 1).applyQuaternion(q);
 
     // Mouse pitch/yaw
     let yaw = 0;
     let pitch = 0;
     if (refs.mouse.locked) {
-      // Mouse-look: accumulated relative motion since last frame.
       const sens = 0.0025;
       yaw = -refs.mouse.dx * sens;
       pitch = -refs.mouse.dy * sens;
       refs.mouse.dx = 0;
       refs.mouse.dy = 0;
     } else {
-      // Free-aim: cursor position over canvas → continuous turn rate.
-      // Small center deadzone so resting the cursor doesn't drift the ship.
       const DEAD = 0.08;
-      const MAX_RATE = 2.2; // rad/sec at edge
+      const MAX_RATE = 2.2;
       const applyAxis = (v: number) => {
         const m = Math.abs(v);
         if (m < DEAD) return 0;
-        const t = (m - DEAD) / (1 - DEAD); // 0..1 outside deadzone
-        return Math.sign(v) * t * t * MAX_RATE * d; // ease-in for fine control
+        const t = (m - DEAD) / (1 - DEAD);
+        return Math.sign(v) * t * t * MAX_RATE * d;
       };
       yaw = -applyAxis(refs.mouse.aimX);
       pitch = -applyAxis(refs.mouse.aimY);
     }
 
-    // Keyboard pitch/yaw if no pointer lock
+    // Keyboard pitch/yaw
     let kbYaw = 0, kbPitch = 0, kbRoll = 0;
     const k = refs.keys;
     if (k.has("ArrowLeft")) kbYaw += 1.4 * d;
@@ -88,41 +142,38 @@ function ShipController({ refs }: { refs: SharedRefs }) {
     if (k.has("KeyQ")) kbRoll += 1.6 * d;
     if (k.has("KeyE")) kbRoll -= 1.6 * d;
 
-    const dq = new THREE.Quaternion();
-    dq.setFromAxisAngle(localY, yaw + kbYaw);
-    q.premultiply(dq);
-    dq.setFromAxisAngle(localX, pitch + kbPitch);
-    q.premultiply(dq);
-    dq.setFromAxisAngle(localZ, kbRoll);
-    q.premultiply(dq);
+    _quatA.setFromAxisAngle(_vy, yaw + kbYaw);
+    q.premultiply(_quatA);
+    _quatA.setFromAxisAngle(_vx, pitch + kbPitch);
+    q.premultiply(_quatA);
+    _quatA.setFromAxisAngle(_vz, kbRoll);
+    q.premultiply(_quatA);
     q.normalize();
 
     // --- Thrust ---
     const accel = 70;
-    const thrust = new THREE.Vector3();
-    if (k.has("KeyW")) thrust.addScaledVector(localZ, -1);
-    if (k.has("KeyS")) thrust.addScaledVector(localZ, 1);
-    if (k.has("KeyA")) thrust.addScaledVector(localX, -1);
-    if (k.has("KeyD")) thrust.addScaledVector(localX, 1);
-    if (k.has("ShiftLeft") || k.has("ShiftRight")) thrust.addScaledVector(localY, 1);
-    if (k.has("ControlLeft") || k.has("ControlRight")) thrust.addScaledVector(localY, -1);
-    if (thrust.lengthSq() > 0) thrust.normalize().multiplyScalar(accel);
-    refs.shipVel.addScaledVector(thrust, d);
+    _vt.set(0, 0, 0);
+    if (k.has("KeyW")) _vt.addScaledVector(_vz, -1);
+    if (k.has("KeyS")) _vt.addScaledVector(_vz, 1);
+    if (k.has("KeyA")) _vt.addScaledVector(_vx, -1);
+    if (k.has("KeyD")) _vt.addScaledVector(_vx, 1);
+    if (k.has("ShiftLeft") || k.has("ShiftRight")) _vt.addScaledVector(_vy, 1);
+    if (k.has("ControlLeft") || k.has("ControlRight")) _vt.addScaledVector(_vy, -1);
+    if (_vt.lengthSq() > 0) _vt.normalize().multiplyScalar(accel);
+    refs.shipVel.addScaledVector(_vt, d);
 
-    // damping (no atmosphere drag, just gentle)
     refs.shipVel.multiplyScalar(Math.pow(0.18, d));
     const maxSpeed = 28;
     if (refs.shipVel.length() > maxSpeed) refs.shipVel.setLength(maxSpeed);
 
-    const prev = refs.shipPos.clone();
+    _vPrev.copy(refs.shipPos);
     refs.shipPos.addScaledVector(refs.shipVel, d);
-    const clamped = clampToLevel(refs.level, refs.shipPos, prev);
+    const clamped = clampToLevel(refs.level, refs.shipPos, _vPrev);
     if (!clamped.equals(refs.shipPos)) {
-      // dampen velocity component into wall
-      const diff = clamped.clone().sub(refs.shipPos);
-      if (Math.abs(diff.x) > 0.0001) refs.shipVel.x = 0;
-      if (Math.abs(diff.y) > 0.0001) refs.shipVel.y = 0;
-      if (Math.abs(diff.z) > 0.0001) refs.shipVel.z = 0;
+      _vDiff.copy(clamped).sub(refs.shipPos);
+      if (Math.abs(_vDiff.x) > 0.0001) refs.shipVel.x = 0;
+      if (Math.abs(_vDiff.y) > 0.0001) refs.shipVel.y = 0;
+      if (Math.abs(_vDiff.z) > 0.0001) refs.shipVel.z = 0;
       refs.shipPos.copy(clamped);
     }
 
@@ -134,152 +185,152 @@ function ShipController({ refs }: { refs: SharedRefs }) {
     fireCooldown.current -= d;
     if ((k.has("Space") || refs.mouse.firing) && fireCooldown.current <= 0) {
       fireCooldown.current = 0.16;
-      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
-      // twin cannons offset
-      const right = localX.clone().multiplyScalar(0.6);
-      const down = localY.clone().multiplyScalar(-0.3);
-      const base = refs.shipPos.clone().add(down).add(fwd.clone().multiplyScalar(1.5));
-      spawnLaser(refs, base.clone().add(right), fwd, false);
-      spawnLaser(refs, base.clone().sub(right), fwd, false);
+      // fwd = (0,0,-1) rotated by q
+      _vu.set(0, 0, -1).applyQuaternion(q);
+      // base = shipPos + (-0.3)*localY + 1.5*fwd
+      _vBase.copy(refs.shipPos).addScaledVector(_vy, -0.3).addScaledVector(_vu, 1.5);
+      // right cannon
+      _vt.copy(_vBase).addScaledVector(_vx, 0.6);
+      spawnLaser(refs, _vt, _vu, false);
+      // left cannon
+      _vt.copy(_vBase).addScaledVector(_vx, -0.6);
+      spawnLaser(refs, _vt, _vu, false);
     }
   });
 
   return null;
 }
 
-function LaserMesh({ laser }: { laser: Laser }) {
-  const ref = useRef<THREE.Group>(null);
+function LaserPool({ refs }: { refs: SharedRefs }) {
+  const groupRefs = useRef<(THREE.Group | null)[]>([]);
+  const coreRefs = useRef<(THREE.Mesh | null)[]>([]);
+  const haloRefs = useRef<(THREE.Mesh | null)[]>([]);
+
   useFrame(() => {
-    if (ref.current) {
-      ref.current.position.copy(laser.pos);
-      ref.current.lookAt(laser.pos.clone().add(laser.vel));
-      ref.current.rotateX(Math.PI / 2);
+    const pool = refs.lasers;
+    for (let i = 0; i < pool.length; i++) {
+      const L = pool[i]!;
+      const g = groupRefs.current[i];
+      if (!g) continue;
+      if (!L.active) {
+        if (g.visible) g.visible = false;
+        continue;
+      }
+      g.visible = true;
+      g.position.copy(L.pos);
+      _vTarget.copy(L.pos).add(L.vel);
+      g.lookAt(_vTarget);
+      g.rotateX(Math.PI / 2);
+      const core = coreRefs.current[i];
+      const halo = haloRefs.current[i];
+      const coreMat = L.hostile ? LASER_CORE_MAT_HOSTILE : LASER_CORE_MAT_FRIENDLY;
+      const haloMat = L.hostile ? LASER_HALO_MAT_HOSTILE : LASER_HALO_MAT_FRIENDLY;
+      if (core && core.material !== coreMat) core.material = coreMat;
+      if (halo && halo.material !== haloMat) halo.material = haloMat;
     }
   });
-  const color = laser.hostile ? "#33ff88" : "#ff3a55";
-  const glow = laser.hostile ? "#88ffaa" : "#ffaaaa";
+
+  const slots = useMemo(
+    () => Array.from({ length: LASER_POOL_SIZE }, (_, i) => i),
+    [],
+  );
   return (
-    <group ref={ref}>
-      {/* Bright inner core */}
-      <mesh>
-        <cylinderGeometry args={[0.08, 0.08, 1.8, 6]} />
-        <meshBasicMaterial color={glow} toneMapped={false} />
-      </mesh>
-      {/* Outer additive halo */}
-      <mesh>
-        <cylinderGeometry args={[0.28, 0.28, 1.8, 6]} />
-        <meshBasicMaterial
-          color={color}
-          transparent
-          opacity={0.55}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-          toneMapped={false}
-        />
-      </mesh>
-      <pointLight color={color} intensity={1.4} distance={6} decay={2} />
-    </group>
+    <>
+      {slots.map((i) => (
+        <group key={i} visible={false} ref={(el) => { groupRefs.current[i] = el; }}>
+          <mesh
+            geometry={LASER_CORE_GEO}
+            material={LASER_CORE_MAT_FRIENDLY}
+            ref={(el) => { coreRefs.current[i] = el; }}
+          />
+          <mesh
+            geometry={LASER_HALO_GEO}
+            material={LASER_HALO_MAT_FRIENDLY}
+            ref={(el) => { haloRefs.current[i] = el; }}
+          />
+        </group>
+      ))}
+    </>
   );
 }
 
-function RobotMesh({ robot }: { robot: Robot }) {
-  const ref = useRef<THREE.Group>(null);
-  const ringRef = useRef<THREE.Mesh>(null);
-  const eyeRef = useRef<THREE.Mesh>(null);
+function RobotPool({ refs }: { refs: SharedRefs }) {
+  const groupRefs = useRef<(THREE.Group | null)[]>([]);
+  const ringRefs = useRef<(THREE.Mesh | null)[]>([]);
+  const eyeMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
+
   useFrame((state) => {
-    const t = state.clock.elapsedTime + robot.bobPhase;
-    if (ref.current) {
-      ref.current.position.copy(robot.pos);
-      ref.current.rotation.y = t * 0.6;
-    }
-    if (ringRef.current) {
-      ringRef.current.rotation.x = t * 1.4;
-      ringRef.current.rotation.z = t * 0.9;
-    }
-    if (eyeRef.current) {
-      const m = eyeRef.current.material as THREE.MeshBasicMaterial;
-      const pulse = 0.7 + Math.sin(t * 6) * 0.3;
-      (m.color as THREE.Color).setRGB(0.2 * pulse, 1.0 * pulse, 0.45 * pulse);
+    const t = state.clock.elapsedTime;
+    const robots = refs.robots;
+    for (let i = 0; i < robots.length; i++) {
+      const r = robots[i]!;
+      const g = groupRefs.current[i];
+      if (!g) continue;
+      if (!r.alive) {
+        if (g.visible) g.visible = false;
+        continue;
+      }
+      g.visible = true;
+      const tt = t + r.bobPhase;
+      g.position.copy(r.pos);
+      g.rotation.y = tt * 0.6;
+      const ring = ringRefs.current[i];
+      if (ring) {
+        ring.rotation.x = tt * 1.4;
+        ring.rotation.z = tt * 0.9;
+      }
+      const m = eyeMatRefs.current[i];
+      if (m) {
+        const pulse = 0.7 + Math.sin(tt * 6) * 0.3;
+        m.color.setRGB(0.2 * pulse, 1.0 * pulse, 0.45 * pulse);
+      }
     }
   });
-  if (!robot.alive) return null;
+
   return (
-    <group ref={ref}>
-      {/* Hull — faceted body */}
-      <mesh>
-        <octahedronGeometry args={[1.4, 0]} />
-        <meshStandardMaterial
-          color="#7a8392"
-          emissive="#0a1018"
-          emissiveIntensity={0.4}
-          metalness={0.85}
-          roughness={0.35}
-          flatShading
-        />
-      </mesh>
-      {/* Belt of armor plates */}
-      <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[1.05, 0.18, 8, 16]} />
-        <meshStandardMaterial
-          color="#3a3540"
-          metalness={0.95}
-          roughness={0.25}
-          flatShading
-        />
-      </mesh>
-      {/* Spinning targeting ring */}
-      <mesh ref={ringRef}>
-        <torusGeometry args={[1.7, 0.05, 6, 32]} />
-        <meshStandardMaterial
-          color="#33ff88"
-          emissive="#33ff88"
-          emissiveIntensity={2.2}
-          toneMapped={false}
-        />
-      </mesh>
-      {/* Glowing eye */}
-      <mesh ref={eyeRef} position={[0, 0, 0]}>
-        <sphereGeometry args={[0.5, 16, 16]} />
-        <meshBasicMaterial color="#33ff88" toneMapped={false} />
-      </mesh>
-      {/* Halo glow */}
-      <mesh>
-        <sphereGeometry args={[0.85, 12, 12]} />
-        <meshBasicMaterial
-          color="#33ff88"
-          transparent
-          opacity={0.18}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-          toneMapped={false}
-        />
-      </mesh>
-      <pointLight color="#33ff88" intensity={1.2} distance={9} decay={2} />
-    </group>
+    <>
+      {refs.robots.map((_, i) => (
+        <group key={i} ref={(el) => { groupRefs.current[i] = el; }}>
+          <mesh geometry={ROBOT_HULL_GEO} material={ROBOT_HULL_MAT} />
+          <mesh geometry={ROBOT_BELT_GEO} material={ROBOT_BELT_MAT} rotation={[Math.PI / 2, 0, 0]} />
+          <mesh
+            geometry={ROBOT_RING_GEO}
+            material={ROBOT_RING_MAT}
+            ref={(el) => { ringRefs.current[i] = el; }}
+          />
+          <mesh geometry={ROBOT_EYE_GEO}>
+            <meshBasicMaterial
+              color="#33ff88"
+              toneMapped={false}
+              ref={(m) => { eyeMatRefs.current[i] = m; }}
+            />
+          </mesh>
+          <mesh geometry={ROBOT_HALO_GEO} material={ROBOT_HALO_MAT} />
+        </group>
+      ))}
+    </>
   );
 }
 
-function GameLoop({ refs, version }: { refs: SharedRefs; version: number }) {
-  const [, setTick] = useState(0);
-  void version;
-
+function GameLoop({ refs }: { refs: SharedRefs }) {
   useFrame((_, dt) => {
     if (refs.hud.current.status !== "playing") return;
     const d = Math.min(dt, 0.05);
 
-    // Move lasers, collide with walls + entities
-    for (let i = refs.lasers.length - 1; i >= 0; i--) {
-      const L = refs.lasers[i]!;
+    // Lasers — iterate fixed pool, no React render, no splice
+    const pool = refs.lasers;
+    for (let i = 0; i < pool.length; i++) {
+      const L = pool[i]!;
+      if (!L.active) continue;
       L.life -= d;
       L.pos.addScaledVector(L.vel, d);
-      if (L.life <= 0) { refs.lasers.splice(i, 1); continue; }
+      if (L.life <= 0) { L.active = false; continue; }
 
-      // Wall collision: clamp; if it moved, kill
       const cx = Math.round(L.pos.x / CELL);
       const cy = Math.round(L.pos.y / CELL);
       const cz = Math.round(L.pos.z / CELL);
       const cell = refs.level.cells.get(key(cx, cy, cz));
-      if (!cell) { refs.lasers.splice(i, 1); continue; }
+      if (!cell) { L.active = false; continue; }
 
       // Hit player?
       if (L.hostile) {
@@ -293,7 +344,7 @@ function GameLoop({ refs, version }: { refs: SharedRefs; version: number }) {
             dmg -= absorbed;
           }
           hud.health -= dmg;
-          refs.lasers.splice(i, 1);
+          L.active = false;
           if (hud.health <= 0) {
             hud.health = 0;
             hud.status = "dead";
@@ -305,12 +356,14 @@ function GameLoop({ refs, version }: { refs: SharedRefs; version: number }) {
       } else {
         // Hit robot?
         let hit = false;
-        for (const r of refs.robots) {
-          if (!r.alive) continue;
-          if (L.pos.distanceToSquared(r.pos) < 1.8 * 1.8) {
-            r.hp -= 25;
-            if (r.hp <= 0) {
-              r.alive = false;
+        const robots = refs.robots;
+        for (let r = 0; r < robots.length; r++) {
+          const R = robots[r]!;
+          if (!R.alive) continue;
+          if (L.pos.distanceToSquared(R.pos) < 1.8 * 1.8) {
+            R.hp -= 25;
+            if (R.hp <= 0) {
+              R.alive = false;
               const hud = refs.hud.current;
               hud.score += 100;
               hud.enemiesLeft -= 1;
@@ -329,7 +382,6 @@ function GameLoop({ refs, version }: { refs: SharedRefs; version: number }) {
           if (L.pos.distanceToSquared(refs.level.reactor) < 3.5 * 3.5) {
             const hud = refs.hud.current;
             hud.score += 25;
-            // reactor takes hits — track via score-style hp on hud message
             (refs.level as any).reactorHp = ((refs.level as any).reactorHp ?? 200) - 25;
             if ((refs.level as any).reactorHp <= 0) {
               hud.reactorAlive = false;
@@ -343,10 +395,10 @@ function GameLoop({ refs, version }: { refs: SharedRefs; version: number }) {
             hit = true;
           }
         }
-        if (hit) { refs.lasers.splice(i, 1); continue; }
+        if (hit) { L.active = false; continue; }
       }
 
-      // Wall-edge kill: if outside playable cell volume on a closed face
+      // Wall-edge kill
       const lx = L.pos.x - cx * CELL;
       const ly = L.pos.y - cy * CELL;
       const lz = L.pos.z - cz * CELL;
@@ -354,21 +406,21 @@ function GameLoop({ refs, version }: { refs: SharedRefs; version: number }) {
       if ((lx > H && !cell.open.px) || (lx < -H && !cell.open.nx) ||
           (ly > H && !cell.open.py) || (ly < -H && !cell.open.ny) ||
           (lz > H && !cell.open.pz) || (lz < -H && !cell.open.nz)) {
-        refs.lasers.splice(i, 1);
+        L.active = false;
       }
     }
 
     // Robot AI
-    for (const r of refs.robots) {
+    const robots = refs.robots;
+    for (let i = 0; i < robots.length; i++) {
+      const r = robots[i]!;
       if (!r.alive) continue;
       r.bobPhase += d;
-      // gentle bob
       r.pos.y += Math.sin(r.bobPhase * 1.2) * 0.04 * d * 30;
       r.fireCooldown -= d;
-      const toPlayer = refs.shipPos.clone().sub(r.pos);
-      const dist = toPlayer.length();
+      _vt.copy(refs.shipPos).sub(r.pos);
+      const dist = _vt.length();
       if (dist < 28 && r.fireCooldown <= 0) {
-        // line of sight: same cell as player or adjacent open cell
         const rcx = Math.round(r.pos.x / CELL);
         const rcy = Math.round(r.pos.y / CELL);
         const rcz = Math.round(r.pos.z / CELL);
@@ -377,41 +429,30 @@ function GameLoop({ refs, version }: { refs: SharedRefs; version: number }) {
         const pcz = Math.round(refs.shipPos.z / CELL);
         if (rcx === pcx && rcy === pcy && rcz === pcz) {
           r.fireCooldown = 1.4 + Math.random() * 0.8;
-          const dir = toPlayer.normalize();
-          spawnLaser(refs, r.pos.clone().add(dir.clone().multiplyScalar(1.5)), dir, true);
+          _vt.normalize();
+          _vu.copy(r.pos).addScaledVector(_vt, 1.5);
+          spawnLaser(refs, _vu, _vt, true);
         } else {
           r.fireCooldown = 0.6;
         }
       }
     }
-
-    // trigger render of HUD-less laser/robot meshes via state tick
-    setTick((t) => (t + 1) % 1000000);
   });
 
-  return (
-    <>
-      {refs.lasers.map((L) => <LaserMesh key={L.id} laser={L} />)}
-      {refs.robots.map((R) => <RobotMesh key={R.id} robot={R} />)}
-    </>
-  );
+  return null;
 }
 
 function ShipBody({ refs }: { refs: SharedRefs }) {
-  // Slim cockpit hint: a faint emissive ring "frame" rendered just in front of the camera.
   const ref = useRef<THREE.Group>(null);
   useFrame(() => {
     if (!ref.current) return;
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(refs.shipQuat);
-    ref.current.position.copy(refs.shipPos).add(fwd.multiplyScalar(0.4));
+    _vu.set(0, 0, -1).applyQuaternion(refs.shipQuat);
+    ref.current.position.copy(refs.shipPos).addScaledVector(_vu, 0.4);
     ref.current.quaternion.copy(refs.shipQuat);
   });
   return (
     <group ref={ref}>
-      <mesh>
-        <ringGeometry args={[0.08, 0.1, 24]} />
-        <meshBasicMaterial color="#ff7a2e" transparent opacity={0.7} side={THREE.DoubleSide} />
-      </mesh>
+      <mesh geometry={SHIP_RING_GEO} material={SHIP_RING_MAT} />
     </group>
   );
 }
@@ -430,26 +471,22 @@ function DustField() {
     g.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     return g;
   }, []);
+  const mat = useMemo(() => new THREE.PointsMaterial({
+    color: "#ffaa66",
+    size: 0.08,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.55,
+    depthWrite: false,
+    toneMapped: false,
+  }), []);
   const { camera } = useThree();
   useFrame(() => {
     if (ref.current) {
-      // keep dust field roughly around the camera
       ref.current.position.copy(camera.position);
     }
   });
-  return (
-    <points ref={ref} geometry={geo}>
-      <pointsMaterial
-        color="#ffaa66"
-        size={0.08}
-        sizeAttenuation
-        transparent
-        opacity={0.55}
-        depthWrite={false}
-        toneMapped={false}
-      />
-    </points>
-  );
+  return <points ref={ref} geometry={geo} material={mat} />;
 }
 
 function hasWebGL(): boolean {
@@ -490,6 +527,8 @@ export function Game() {
   return <GameInner />;
 }
 
+let nextRobotId = 1;
+
 function GameInner() {
   const [hudState, setHudState] = useState<GameState>(initialState);
   const hudRef = useRef<GameState>(hudState);
@@ -509,11 +548,22 @@ function GameInner() {
       bobPhase: Math.random() * 6.28,
       alive: true,
     }));
+    const lasers: Laser[] = [];
+    for (let i = 0; i < LASER_POOL_SIZE; i++) {
+      lasers.push({
+        id: i,
+        pos: new THREE.Vector3(),
+        vel: new THREE.Vector3(),
+        life: 0,
+        hostile: false,
+        active: false,
+      });
+    }
     return {
       shipPos: level.start.clone(),
       shipQuat: new THREE.Quaternion(),
       shipVel: new THREE.Vector3(),
-      lasers: [],
+      lasers,
       robots,
       level,
       setHud: setHudState,
@@ -523,12 +573,10 @@ function GameInner() {
     };
   }, [level]);
 
-  // Init enemies count
   useEffect(() => {
     setHudState((s) => ({ ...s, enemiesLeft: refs.robots.length }));
   }, [refs]);
 
-  // Input handlers
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
       if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab"].includes(e.code)) {
@@ -546,7 +594,6 @@ function GameInner() {
         });
         return;
       }
-      // Don't feed ship-control keys while map is open.
       if (mapOpenRef.current) return;
       refs.keys.add(e.code);
     };
@@ -561,7 +608,6 @@ function GameInner() {
         refs.mouse.dy += e.movementY;
         return;
       }
-      // Free-aim mode: derive aim offset from cursor position over the game canvas.
       if (mapOpenRef.current) return;
       const canvas = document.querySelector("canvas");
       if (!canvas) return;
@@ -570,12 +616,11 @@ function GameInner() {
         e.clientX < rect.left || e.clientX > rect.right ||
         e.clientY < rect.top  || e.clientY > rect.bottom
       ) {
-        // cursor outside canvas: stop turning
         refs.mouse.aimX = 0;
         refs.mouse.aimY = 0;
         return;
       }
-      const nx = (e.clientX - rect.left) / rect.width  * 2 - 1; // -1..1
+      const nx = (e.clientX - rect.left) / rect.width  * 2 - 1;
       const ny = (e.clientY - rect.top)  / rect.height * 2 - 1;
       refs.mouse.aimX = Math.max(-1, Math.min(1, nx));
       refs.mouse.aimY = Math.max(-1, Math.min(1, ny));
@@ -621,19 +666,16 @@ function GameInner() {
       reactorAlive: true,
       message: "",
     });
-    // reset world
     refs.shipPos.copy(level.start);
     refs.shipQuat.identity();
     refs.shipVel.set(0, 0, 0);
-    refs.lasers.length = 0;
+    for (let i = 0; i < refs.lasers.length; i++) refs.lasers[i]!.active = false;
     refs.robots.forEach((r, i) => {
       r.alive = true;
       r.hp = 50;
       r.pos.copy(level.enemySpawns[i]!);
     });
     (level as any).reactorHp = 200;
-    // Pointer lock is optional now — mouse turning works either way.
-    // Don't auto-request; let the player opt in by clicking the canvas.
   };
 
   return (
@@ -662,8 +704,9 @@ function GameInner() {
         <DustField />
         <ShipController refs={refs} />
         <ShipBody refs={refs} />
-        <GameLoop refs={refs} version={hudState.status === "playing" ? 1 : 0} />
-        {/* Headlight */}
+        <GameLoop refs={refs} />
+        <LaserPool refs={refs} />
+        <RobotPool refs={refs} />
         <Headlight refs={refs} />
         <EffectComposer multisampling={0}>
           <Bloom
@@ -711,8 +754,8 @@ function Headlight({ refs }: { refs: SharedRefs }) {
   useFrame(() => {
     if (!ref.current) return;
     ref.current.position.copy(refs.shipPos);
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(refs.shipQuat);
-    targetRef.current.position.copy(refs.shipPos).add(fwd.multiplyScalar(20));
+    _vu.set(0, 0, -1).applyQuaternion(refs.shipQuat);
+    targetRef.current.position.copy(refs.shipPos).addScaledVector(_vu, 20);
   });
   return (
     <spotLight
@@ -730,7 +773,6 @@ function Headlight({ refs }: { refs: SharedRefs }) {
 function Hud({ state, onStart }: { state: GameState; onStart: () => void }) {
   return (
     <div className="pointer-events-none absolute inset-0 flex flex-col">
-      {/* Crosshair */}
       {state.status === "playing" && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="relative h-10 w-10">
@@ -741,7 +783,6 @@ function Hud({ state, onStart }: { state: GameState; onStart: () => void }) {
         </div>
       )}
 
-      {/* HUD bars */}
       {state.status !== "menu" && (
         <>
           <div className="absolute left-4 bottom-4 w-72 rounded border border-orange-500/40 bg-black/60 p-3 text-xs uppercase tracking-widest text-orange-200">
@@ -772,7 +813,6 @@ function Hud({ state, onStart }: { state: GameState; onStart: () => void }) {
         </>
       )}
 
-      {/* Menus */}
       {state.status === "menu" && (
         <Overlay>
           <h1 className="mb-3 text-4xl font-black tracking-[0.3em] text-orange-400">

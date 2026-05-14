@@ -7,6 +7,8 @@ type Props = { level: Level };
 
 type Junction = { pos: THREE.Vector3; color: THREE.Color; intensity: number };
 
+const JUNCTION_SPHERE_GEO = new THREE.SphereGeometry(0.35, 10, 10);
+
 // ---------- Procedural sci-fi industrial wall textures ----------
 // Original art in the genre of dark plated mine/station corridors:
 // big riveted panels, hex vent grilles, conduit runs, warning chevrons.
@@ -494,7 +496,7 @@ export function LevelMesh({ level }: Props) {
         const pk = built.perKind[k]!;
         return (
           <group key={k}>
-            <mesh geometry={pk.wallGeo}>
+            <mesh geometry={pk.wallGeo} matrixAutoUpdate={false}>
               <meshStandardMaterial
                 vertexColors
                 map={pk.tex.map}
@@ -508,7 +510,7 @@ export function LevelMesh({ level }: Props) {
                 emissiveMap={pk.tex.map}
               />
             </mesh>
-            <mesh geometry={pk.panelGeo}>
+            <mesh geometry={pk.panelGeo} matrixAutoUpdate={false}>
               <meshStandardMaterial
                 color={k === "warning" ? "#1a0808" : k === "steel" ? "#0d1218" : "#1a1410"}
                 roughness={0.4}
@@ -516,7 +518,7 @@ export function LevelMesh({ level }: Props) {
                 flatShading
               />
             </mesh>
-            <mesh geometry={pk.accentGeo}>
+            <mesh geometry={pk.accentGeo} matrixAutoUpdate={false}>
               <meshStandardMaterial
                 color={pk.accent.color}
                 emissive={pk.accent.emissive}
@@ -530,15 +532,17 @@ export function LevelMesh({ level }: Props) {
         );
       })}
 
-      <lineSegments geometry={built.edgeGeo}>
+      <lineSegments geometry={built.edgeGeo} matrixAutoUpdate={false}>
         <lineBasicMaterial color="#ffaa55" transparent opacity={0.45} toneMapped={false} />
       </lineSegments>
 
       {built.junctions.map((j, i) => (
-        <group key={i} position={[j.pos.x, j.pos.y, j.pos.z]}>
-          <pointLight color={j.color} intensity={j.intensity} distance={CELL * 1.8} decay={2} />
-          <mesh>
-            <sphereGeometry args={[0.35, 10, 10]} />
+        <group
+          key={i}
+          position={[j.pos.x, j.pos.y, j.pos.z]}
+          ref={(g) => { if (g) { g.updateMatrix(); g.matrixAutoUpdate = false; } }}
+        >
+          <mesh geometry={JUNCTION_SPHERE_GEO}>
             <meshBasicMaterial color={j.color} toneMapped={false} />
           </mesh>
         </group>
