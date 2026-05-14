@@ -50,6 +50,13 @@ export type Prop = {
   cell: [number, number, number];
   // Region kind of the host cell — drives material tint at render time.
   biome: "steel" | "tan" | "warning";
+  // Current HP. Destructible props start at PROP_HP[kind]; indestructible
+  // props stay at Infinity so generic damage calls are no-ops.
+  hp: number;
+  maxHp: number;
+  // Flipped true by `destroyProp` so renderers can hide the mesh even
+  // though the array reference may have been spliced out of level.props.
+  destroyed: boolean;
 };
 
 export type PickupKind = "shield_cell" | "ammo_core" | "score_chip";
@@ -63,6 +70,21 @@ export type Pickup = {
   // Animation phase offset so neighbors don't bob/spin in lockstep.
   phase: number;
 };
+
+// HP for destructible prop kinds. Anything not listed here is indestructible
+// (columns, structural tanks, coolant tanks, generators, server racks) so
+// room silhouettes don't collapse mid-fight.
+export const PROP_HP: Partial<Record<PropKind, number>> = {
+  crate: 30,
+  barrel: 20,
+  console: 45,
+  pipes: 35,
+};
+
+export function isPropDestructible(kind: PropKind): boolean {
+  return PROP_HP[kind] !== undefined;
+}
+
 
 export type Level = {
   cells: Map<CellKey, Cell>;
@@ -518,7 +540,11 @@ export function generateLevel(seed = 1): Level {
             const dCz = cwz - cz * CELL;
             if (dCx * dCx + dCz * dCz < 4 * 4) continue;
 
-            const propRec: Prop = { kind, pos, half, rotY, cell: [cx, cy, cz], biome };
+            const hp = PROP_HP[kind] ?? Infinity;
+            const propRec: Prop = {
+              kind, pos, half, rotY, cell: [cx, cy, cz], biome,
+              hp, maxHp: hp, destroyed: false,
+            };
             placedHere.push(propRec);
             pushProp(propRec);
             placed++;
@@ -876,6 +902,23 @@ export function bfsNextStep(
   }
   const parts = curK.split(",");
   return [Number(parts[0]), Number(parts[1]), Number(parts[2])];
+}
+
+// Remove a prop from the level. Marks it destroyed (renderers watch this
+// flag) and splices it out of `props` and `propsByCell` so ship collision
+// and AI tests stop considering it.
+export function destroyProp(level: Level, prop: Prop): void {
+  if (prop.destroyed) return;
+  prop.destroyed = true;
+  const i = level.props.indexOf(prop);
+  if (i >= 0) level.props.splice(i, 1);
+  const k = key(prop.cell[0], prop.cell[1], prop.cell[2]);
+  const arr = level.propsByCell.get(k);
+  if (arr) {
+    const j = arr.indexOf(prop);
+    if (j >= 0) arr.splice(j, 1);
+    if (arr.length === 0) level.propsByCell.delete(k);
+  }
 }
 
 export function pointInLevel(level: Level, pos: THREE.Vector3): boolean {

@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { CELL, HALF, type Cell, type Level, type Pickup, type PickupKind, type Prop, type PropKind } from "./level";
@@ -624,9 +624,13 @@ const CYL_TAPER = new THREE.CylinderGeometry(0.85, 1, 1, 10);
 const TORUS = new THREE.TorusGeometry(1, 0.06, 6, 16);
 
 function PropField({ props }: { props: Prop[] }) {
+  // Snapshot the prop list once so subsequent splices (from destroyProp)
+  // don't shift React keys or remove still-rendered children. Visibility is
+  // toggled per-mesh via the `destroyed` flag instead.
+  const initial = useMemo(() => props.slice(), [props]);
   return (
     <group>
-      {props.map((p, i) => (
+      {initial.map((p, i) => (
         <PropMesh key={i} p={p} />
       ))}
     </group>
@@ -638,9 +642,15 @@ function PropMesh({ p }: { p: Prop }) {
   const trim = trimMat(p.biome);
   const glow = glowMat(p.biome);
   const hx = p.half[0], hy = p.half[1], hz = p.half[2];
-  const setMatrixOnce = (g: THREE.Group | null) => {
+  const groupRef = useRef<THREE.Group | null>(null);
+  const setMatrixOnce = useCallback((g: THREE.Group | null) => {
+    groupRef.current = g;
     if (g) { g.updateMatrix(); g.matrixAutoUpdate = false; }
-  };
+  }, []);
+  useFrame(() => {
+    const g = groupRef.current;
+    if (g && p.destroyed && g.visible) g.visible = false;
+  });
   switch (p.kind as PropKind) {
     case "column": {
       return (

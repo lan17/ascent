@@ -5,7 +5,7 @@ import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh, Pickups, type PickupRuntime } from "./LevelMesh";
 import { MapView } from "./MapView";
-import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, resolveShipProps, CELL, HALF, type Level } from "./level";
+import { bfsNextStep, clampToLevel, destroyProp, generateLevel, isPropDestructible, key, losAxisAligned, neighborCells, resolveShipProps, CELL, HALF, type Level } from "./level";
 import {
   initialState,
   ROBOT_ARCHETYPES,
@@ -992,6 +992,40 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       const cz = Math.round(L.pos.z / CELL);
       const cell = refs.level.cells.get(key(cx, cy, cz));
       if (!cell) { L.active = false; continue; }
+
+      // Hit prop? Tests the laser tip against AABBs of props in the current
+      // cell. Indestructible props (columns, tanks, etc.) still block lasers
+      // with a spark; destructible kinds also chip down and explode at 0 HP.
+      const cellProps = refs.level.propsByCell.get(key(cx, cy, cz));
+      if (cellProps && cellProps.length > 0) {
+        let propHit = false;
+        for (let pi = 0; pi < cellProps.length; pi++) {
+          const pr = cellProps[pi]!;
+          if (
+            L.pos.x > pr.pos[0] - pr.half[0] && L.pos.x < pr.pos[0] + pr.half[0] &&
+            L.pos.y > pr.pos[1] - pr.half[1] && L.pos.y < pr.pos[1] + pr.half[1] &&
+            L.pos.z > pr.pos[2] - pr.half[2] && L.pos.z < pr.pos[2] + pr.half[2]
+          ) {
+            spawnExplosion(refs, L.pos, "spark");
+            if (isPropDestructible(pr.kind)) {
+              pr.hp -= L.damage;
+              if (pr.hp <= 0) {
+                _vt.set(pr.pos[0], pr.pos[1], pr.pos[2]);
+                spawnExplosion(refs, _vt, "spark");
+                const chunks = 4 + Math.floor(Math.random() * 2);
+                for (let dpi = 0; dpi < chunks; dpi++) {
+                  spawnDebris(refs, _vt, "grunt");
+                }
+                destroyProp(refs.level, pr);
+              }
+            }
+            L.active = false;
+            propHit = true;
+            break;
+          }
+        }
+        if (propHit) continue;
+      }
 
       // Hit player?
       if (L.hostile) {
