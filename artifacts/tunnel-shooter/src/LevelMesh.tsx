@@ -19,61 +19,68 @@ function makeWallTextures(): { map: THREE.Texture; normalMap: THREE.Texture; rou
   // ---- DIFFUSE ----
   const diff = mk();
   const dctx = diff.getContext("2d")!;
-  // Base
+  // Base — brighter so it actually reads under any light
   const grad = dctx.createLinearGradient(0, 0, SIZE, SIZE);
-  grad.addColorStop(0, "#6b4226");
-  grad.addColorStop(1, "#3a2010");
+  grad.addColorStop(0, "#c69970");
+  grad.addColorStop(1, "#8a6040");
   dctx.fillStyle = grad;
   dctx.fillRect(0, 0, SIZE, SIZE);
   // Noise
   const img = dctx.getImageData(0, 0, SIZE, SIZE);
   for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 40;
+    const n = (Math.random() - 0.5) * 50;
     img.data[i] = Math.max(0, Math.min(255, img.data[i]! + n));
-    img.data[i + 1] = Math.max(0, Math.min(255, img.data[i + 1]! + n * 0.8));
-    img.data[i + 2] = Math.max(0, Math.min(255, img.data[i + 2]! + n * 0.6));
+    img.data[i + 1] = Math.max(0, Math.min(255, img.data[i + 1]! + n * 0.85));
+    img.data[i + 2] = Math.max(0, Math.min(255, img.data[i + 2]! + n * 0.7));
   }
   dctx.putImageData(img, 0, 0);
-  // Panel divisions (cross + sub panels)
-  dctx.strokeStyle = "rgba(8,4,2,0.85)";
-  dctx.lineWidth = 4;
-  dctx.strokeRect(2, 2, SIZE - 4, SIZE - 4);
+  // Panel divisions — THICK dark grooves that survive mipmapping
+  dctx.strokeStyle = "rgba(20,10,4,0.95)";
+  dctx.lineWidth = 10;
+  dctx.strokeRect(5, 5, SIZE - 10, SIZE - 10);
   dctx.beginPath();
   dctx.moveTo(SIZE / 2, 0); dctx.lineTo(SIZE / 2, SIZE);
   dctx.moveTo(0, SIZE / 2); dctx.lineTo(SIZE, SIZE / 2);
   dctx.stroke();
-  // Highlight edges (bevel)
-  dctx.strokeStyle = "rgba(255,170,100,0.35)";
-  dctx.lineWidth = 1.5;
-  dctx.strokeRect(6, 6, SIZE - 12, SIZE - 12);
+  // Bright bevel highlights right next to grooves — high contrast survives distance
+  dctx.strokeStyle = "rgba(255,220,170,0.85)";
+  dctx.lineWidth = 3;
+  dctx.strokeRect(14, 14, SIZE - 28, SIZE - 28);
   dctx.beginPath();
-  dctx.moveTo(SIZE / 2 + 2, 4); dctx.lineTo(SIZE / 2 + 2, SIZE - 4);
-  dctx.moveTo(4, SIZE / 2 + 2); dctx.lineTo(SIZE - 4, SIZE / 2 + 2);
+  dctx.moveTo(SIZE / 2 + 7, 8); dctx.lineTo(SIZE / 2 + 7, SIZE - 8);
+  dctx.moveTo(8, SIZE / 2 + 7); dctx.lineTo(SIZE - 8, SIZE / 2 + 7);
   dctx.stroke();
-  // Rivets at panel corners + quadrant centers
+  // Rivets — bigger so they survive mip reduction
+  const rivetR = 11;
   const rivets: Array<[number, number]> = [
-    [16, 16], [SIZE - 16, 16], [16, SIZE - 16], [SIZE - 16, SIZE - 16],
-    [SIZE / 2, 16], [SIZE / 2, SIZE - 16], [16, SIZE / 2], [SIZE - 16, SIZE / 2],
+    [28, 28], [SIZE - 28, 28], [28, SIZE - 28], [SIZE - 28, SIZE - 28],
+    [SIZE / 2, 28], [SIZE / 2, SIZE - 28], [28, SIZE / 2], [SIZE - 28, SIZE / 2],
     [SIZE / 4, SIZE / 4], [(3 * SIZE) / 4, SIZE / 4],
     [SIZE / 4, (3 * SIZE) / 4], [(3 * SIZE) / 4, (3 * SIZE) / 4],
   ];
   for (const [x, y] of rivets) {
-    const rg = dctx.createRadialGradient(x - 1, y - 1, 0, x, y, 5);
-    rg.addColorStop(0, "#ffd09a");
-    rg.addColorStop(0.6, "#7a4a26");
-    rg.addColorStop(1, "rgba(0,0,0,0.6)");
+    // Dark recess ring
+    dctx.fillStyle = "rgba(0,0,0,0.7)";
+    dctx.beginPath();
+    dctx.arc(x, y, rivetR + 2, 0, Math.PI * 2);
+    dctx.fill();
+    // Bright bolt
+    const rg = dctx.createRadialGradient(x - 3, y - 3, 0, x, y, rivetR);
+    rg.addColorStop(0, "#fff0d8");
+    rg.addColorStop(0.5, "#d09060");
+    rg.addColorStop(1, "#503020");
     dctx.fillStyle = rg;
     dctx.beginPath();
-    dctx.arc(x, y, 5, 0, Math.PI * 2);
+    dctx.arc(x, y, rivetR, 0, Math.PI * 2);
     dctx.fill();
   }
-  // Hazard stripe along one panel edge (orange/black)
-  const stripeW = 14;
+  // Hazard stripe — wider and brighter
+  const stripeW = 28;
   dctx.save();
   dctx.translate(SIZE / 2 - stripeW / 2, 0);
-  for (let y = 0; y < SIZE; y += 12) {
-    dctx.fillStyle = (y / 12) % 2 === 0 ? "#ffb04a" : "#1a0e06";
-    dctx.fillRect(0, y, stripeW, 12);
+  for (let y = 0; y < SIZE; y += 20) {
+    dctx.fillStyle = (y / 20) % 2 === 0 ? "#ffcc55" : "#100804";
+    dctx.fillRect(0, y, stripeW, 20);
   }
   dctx.restore();
 
@@ -180,11 +187,11 @@ export function LevelMesh({ level }: Props) {
     let pi = 0;
 
     const palette = [
-      new THREE.Color("#7a3a18"),
-      new THREE.Color("#5a2810"),
-      new THREE.Color("#3a1a08"),
-      new THREE.Color("#4a3020"),
-      new THREE.Color("#2a1a14"),
+      new THREE.Color("#e0c0a0"),
+      new THREE.Color("#d0a888"),
+      new THREE.Color("#b89878"),
+      new THREE.Color("#c0a890"),
+      new THREE.Color("#a88868"),
     ];
 
     function quad(
@@ -355,9 +362,12 @@ export function LevelMesh({ level }: Props) {
           map={wallTex.map}
           normalMap={wallTex.normalMap}
           roughnessMap={wallTex.roughnessMap}
-          normalScale={new THREE.Vector2(1.2, 1.2)}
-          roughness={1.0}
-          metalness={0.55}
+          normalScale={new THREE.Vector2(1.6, 1.6)}
+          roughness={0.75}
+          metalness={0.05}
+          emissive="#1a0d05"
+          emissiveIntensity={0.6}
+          emissiveMap={wallTex.map}
         />
       </mesh>
       <mesh geometry={panelGeo}>
