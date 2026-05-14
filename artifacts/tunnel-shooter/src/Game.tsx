@@ -18,7 +18,12 @@ type SharedRefs = {
   setHud: React.Dispatch<React.SetStateAction<GameState>>;
   hud: React.MutableRefObject<GameState>;
   keys: Set<string>;
-  mouse: { dx: number; dy: number; locked: boolean; firing: boolean };
+  mouse: {
+    dx: number; dy: number; // relative movement (used when pointer-locked)
+    aimX: number; aimY: number; // -1..1 offset from canvas center (used when free)
+    locked: boolean;
+    firing: boolean;
+  };
 };
 
 let nextLaserId = 1;
@@ -49,11 +54,29 @@ function ShipController({ refs }: { refs: SharedRefs }) {
     const localZ = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
 
     // Mouse pitch/yaw
-    const sens = 0.0025;
-    const yaw = -refs.mouse.dx * sens;
-    const pitch = -refs.mouse.dy * sens;
-    refs.mouse.dx = 0;
-    refs.mouse.dy = 0;
+    let yaw = 0;
+    let pitch = 0;
+    if (refs.mouse.locked) {
+      // Mouse-look: accumulated relative motion since last frame.
+      const sens = 0.0025;
+      yaw = -refs.mouse.dx * sens;
+      pitch = -refs.mouse.dy * sens;
+      refs.mouse.dx = 0;
+      refs.mouse.dy = 0;
+    } else {
+      // Free-aim: cursor position over canvas → continuous turn rate.
+      // Small center deadzone so resting the cursor doesn't drift the ship.
+      const DEAD = 0.08;
+      const MAX_RATE = 2.2; // rad/sec at edge
+      const applyAxis = (v: number) => {
+        const m = Math.abs(v);
+        if (m < DEAD) return 0;
+        const t = (m - DEAD) / (1 - DEAD); // 0..1 outside deadzone
+        return Math.sign(v) * t * t * MAX_RATE * d; // ease-in for fine control
+      };
+      yaw = -applyAxis(refs.mouse.aimX);
+      pitch = -applyAxis(refs.mouse.aimY);
+    }
 
     // Keyboard pitch/yaw if no pointer lock
     let kbYaw = 0, kbPitch = 0, kbRoll = 0;
@@ -496,7 +519,7 @@ function GameInner() {
       setHud: setHudState,
       hud: hudRef,
       keys: new Set<string>(),
-      mouse: { dx: 0, dy: 0, locked: false, firing: false },
+      mouse: { dx: 0, dy: 0, aimX: 0, aimY: 0, locked: false, firing: false },
     };
   }, [level]);
 
@@ -536,13 +559,34 @@ function GameInner() {
       if (refs.mouse.locked) {
         refs.mouse.dx += e.movementX;
         refs.mouse.dy += e.movementY;
+        return;
       }
+      // Free-aim mode: derive aim offset from cursor position over the game canvas.
+      if (mapOpenRef.current) return;
+      const canvas = document.querySelector("canvas");
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      if (
+        e.clientX < rect.left || e.clientX > rect.right ||
+        e.clientY < rect.top  || e.clientY > rect.bottom
+      ) {
+        // cursor outside canvas: stop turning
+        refs.mouse.aimX = 0;
+        refs.mouse.aimY = 0;
+        return;
+      }
+      const nx = (e.clientX - rect.left) / rect.width  * 2 - 1; // -1..1
+      const ny = (e.clientY - rect.top)  / rect.height * 2 - 1;
+      refs.mouse.aimX = Math.max(-1, Math.min(1, nx));
+      refs.mouse.aimY = Math.max(-1, Math.min(1, ny));
     };
     const clearAll = () => {
       refs.keys.clear();
       refs.mouse.firing = false;
       refs.mouse.dx = 0;
       refs.mouse.dy = 0;
+      refs.mouse.aimX = 0;
+      refs.mouse.aimY = 0;
     };
     const pl = () => {
       refs.mouse.locked = document.pointerLockElement !== null;
@@ -588,13 +632,20 @@ function GameInner() {
       r.pos.copy(level.enemySpawns[i]!);
     });
     (level as any).reactorHp = 200;
-    // request pointer lock
-    const el = document.querySelector("canvas") as HTMLCanvasElement | null;
-    el?.requestPointerLock?.();
+    // Pointer lock is optional now — mouse turning works either way.
+    // Don't auto-request; let the player opt in by clicking the canvas.
   };
 
   return (
-    <div className="absolute inset-0">
+    <div
+      className="absolute inset-0"
+      onClick={() => {
+        if (hudRef.current.status !== "playing" || mapOpenRef.current) return;
+        if (document.pointerLockElement) return;
+        const el = document.querySelector("canvas") as HTMLCanvasElement | null;
+        el?.requestPointerLock?.();
+      }}
+    >
       <Canvas
         camera={{ fov: 78, near: 0.1, far: 600, position: [0, 0, 0] }}
         gl={{ antialias: true, powerPreference: "high-performance" }}
@@ -793,7 +844,8 @@ function Controls() {
       <Row k="W / S" label="Thrust fwd / back" />
       <Row k="A / D" label="Strafe left / right" />
       <Row k="Shift / Ctrl" label="Slide up / down" />
-      <Row k="Mouse" label="Pitch & yaw" />
+      <Row k="Mouse" label="Pitch & yaw (free-aim)" />
+      <Row k="Click canvas" label="Lock mouse for FPS look" />
       <Row k="Q / E" label="Roll left / right" />
       <Row k="Arrows" label="Pitch & yaw (kbd)" />
       <Row k="Click / Space" label="Fire lasers" />
