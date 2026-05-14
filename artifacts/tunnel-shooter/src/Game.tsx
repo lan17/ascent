@@ -57,7 +57,52 @@ type SharedRefs = {
     firing: boolean;
   };
   paused: { current: boolean };
+  shake: { current: number };
+  contactCooldown: { current: number };
 };
+
+type ContactKind = "wall" | "robot" | "debris";
+
+// Threshold (units/sec) below which contact is "gentle" and ignored — prevents
+// nag damage/shake while sliding along a wall or grinding past a robot.
+const CONTACT_SPEED_THRESHOLD: Record<ContactKind, number> = {
+  wall: 5,
+  robot: 5,
+  debris: 7,
+};
+
+const CONTACT_DAMAGE_PER_UNIT: Record<ContactKind, number> = {
+  wall: 1.5,
+  robot: 2.0,
+  debris: 1.8,
+};
+
+function registerContact(refs: SharedRefs, impact: number, kind: ContactKind) {
+  const thresh = CONTACT_SPEED_THRESHOLD[kind];
+  if (impact <= thresh) return;
+  const over = impact - thresh;
+  // Shake always plays above threshold (visual response is cheap and aids feedback).
+  const shakeAdd = Math.min(0.9, 0.12 + over * 0.05);
+  refs.shake.current = Math.min(1.5, refs.shake.current + shakeAdd);
+  // Damage is gated by a short cooldown so a single hard impact doesn't
+  // double-count across consecutive frames.
+  if (refs.contactCooldown.current > 0) return;
+  refs.contactCooldown.current = 0.2;
+  let dmg = Math.min(30, Math.max(3, Math.round(over * CONTACT_DAMAGE_PER_UNIT[kind])));
+  const hud = refs.hud.current;
+  if (hud.shields > 0) {
+    const absorbed = Math.min(hud.shields, dmg);
+    hud.shields -= absorbed;
+    dmg -= absorbed;
+  }
+  hud.health -= dmg;
+  if (hud.health <= 0) {
+    hud.health = 0;
+    hud.status = "dead";
+    hud.message = "SHIP DESTROYED";
+  }
+  refs.setHud({ ...hud });
+}
 
 // ---------- Module-scope scratch (no per-frame allocation in hot paths) ----------
 const _vx = new THREE.Vector3();
@@ -318,15 +363,28 @@ function ShipController({ refs }: { refs: SharedRefs }) {
     const maxSpeed = 28;
     if (refs.shipVel.length() > maxSpeed) refs.shipVel.setLength(maxSpeed);
 
+    refs.contactCooldown.current = Math.max(0, refs.contactCooldown.current - d);
+
     _vPrev.copy(refs.shipPos);
     refs.shipPos.addScaledVector(refs.shipVel, d);
     const clamped = clampToLevel(refs.level, refs.shipPos, _vPrev);
     if (!clamped.equals(refs.shipPos)) {
       _vDiff.copy(clamped).sub(refs.shipPos);
-      if (Math.abs(_vDiff.x) > 0.0001) refs.shipVel.x = 0;
-      if (Math.abs(_vDiff.y) > 0.0001) refs.shipVel.y = 0;
-      if (Math.abs(_vDiff.z) > 0.0001) refs.shipVel.z = 0;
+      let wallImpact = 0;
+      if (Math.abs(_vDiff.x) > 0.0001) {
+        wallImpact = Math.max(wallImpact, Math.abs(refs.shipVel.x));
+        refs.shipVel.x = 0;
+      }
+      if (Math.abs(_vDiff.y) > 0.0001) {
+        wallImpact = Math.max(wallImpact, Math.abs(refs.shipVel.y));
+        refs.shipVel.y = 0;
+      }
+      if (Math.abs(_vDiff.z) > 0.0001) {
+        wallImpact = Math.max(wallImpact, Math.abs(refs.shipVel.z));
+        refs.shipVel.z = 0;
+      }
       refs.shipPos.copy(clamped);
+      registerContact(refs, wallImpact, "wall");
     }
 
     // Ship-vs-robot blocking: treat each live robot as a solid sphere.
@@ -351,7 +409,11 @@ function ShipController({ refs }: { refs: SharedRefs }) {
       const penetration = robotR - dist;
       refs.shipPos.addScaledVector(_vDiff, penetration);
       const vDotN = refs.shipVel.dot(_vDiff);
-      if (vDotN < 0) refs.shipVel.addScaledVector(_vDiff, -vDotN);
+      if (vDotN < 0) {
+        // Closing speed = how fast the ship was moving into the robot.
+        registerContact(refs, -vDotN, "robot");
+        refs.shipVel.addScaledVector(_vDiff, -vDotN);
+      }
       pushedByRobot = true;
     }
     if (pushedByRobot) {
@@ -366,9 +428,16 @@ function ShipController({ refs }: { refs: SharedRefs }) {
       }
     }
 
-    // --- Camera ---
+    // --- Camera (with impact shake) ---
     camera.position.copy(refs.shipPos);
     camera.quaternion.copy(refs.shipQuat);
+    if (refs.shake.current > 0.0001) {
+      const s = refs.shake.current;
+      camera.position.x += (Math.random() * 2 - 1) * s * 0.18;
+      camera.position.y += (Math.random() * 2 - 1) * s * 0.18;
+      camera.position.z += (Math.random() * 2 - 1) * s * 0.18;
+      refs.shake.current = Math.max(0, s - d * 4.5);
+    }
 
     // --- Fire ---
     fireCooldown.current -= d;
@@ -711,9 +780,13 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
     if (refs.paused.current) return;
     const d = Math.min(dt, 0.05);
 
-    // Integrate debris (kinematic): move, dampen, bounce off level walls.
+    // Integrate debris (kinematic): move, dampen, bounce off level walls and
+    // the ship. Hard ship-vs-debris contacts deal contact damage via
+    // registerContact("debris") and reflect the chunk's velocity so it
+    // doesn't sit inside the ship and re-tick damage every frame.
     const debrisPool = refs.debris;
     const linDamp = Math.pow(0.55, d);
+    const SHIP_HIT_R = 0.7;
     for (let i = 0; i < debrisPool.length; i++) {
       const dp = debrisPool[i]!;
       if (!dp.active) continue;
@@ -729,6 +802,40 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       if (Math.abs(clamped.y - dp.pos.y) > 1e-4) dp.vel.y = -dp.vel.y * 0.55;
       if (Math.abs(clamped.z - dp.pos.z) > 1e-4) dp.vel.z = -dp.vel.z * 0.55;
       dp.pos.copy(clamped);
+
+      // Ship contact: treat the ship as a sphere, deal damage if closing fast.
+      const dx = dp.pos.x - refs.shipPos.x;
+      const dy = dp.pos.y - refs.shipPos.y;
+      const dz = dp.pos.z - refs.shipPos.z;
+      const reach = (DEBRIS_RADII[dp.geoIdx] ?? 0.6) + SHIP_HIT_R;
+      const dsq = dx * dx + dy * dy + dz * dz;
+      if (dsq < reach * reach) {
+        const dist = Math.sqrt(Math.max(dsq, 1e-6));
+        const nx = dx / dist, ny = dy / dist, nz = dz / dist; // ship -> debris
+        // Closing speed = component of (debris - ship) velocity along
+        // ship->debris, negated (positive means moving toward the ship).
+        const rvx = dp.vel.x - refs.shipVel.x;
+        const rvy = dp.vel.y - refs.shipVel.y;
+        const rvz = dp.vel.z - refs.shipVel.z;
+        const closing = -(rvx * nx + rvy * ny + rvz * nz);
+        if (closing > 0) {
+          registerContact(refs, closing, "debris");
+          // Reflect debris velocity along the normal so it kicks away from
+          // the ship instead of sitting on top of it.
+          const bounce = closing * 1.6;
+          dp.vel.x += nx * bounce;
+          dp.vel.y += ny * bounce;
+          dp.vel.z += nz * bounce;
+          // Nudge the chunk just outside the ship's sphere to break contact.
+          const push = reach - dist + 0.01;
+          if (push > 0) {
+            dp.pos.x += nx * push;
+            dp.pos.y += ny * push;
+            dp.pos.z += nz * push;
+          }
+        }
+      }
+
       dp.vel.multiplyScalar(linDamp);
       // Spin
       _quatA.setFromAxisAngle(dp.angAxis, dp.angRate * d);
@@ -1174,6 +1281,8 @@ function GameInner() {
       keys: new Set<string>(),
       mouse: { dx: 0, dy: 0, aimX: 0, aimY: 0, locked: false, firing: false },
       paused: pausedRef,
+      shake: { current: 0 },
+      contactCooldown: { current: 0 },
     };
   }, [level]);
 
@@ -1285,6 +1394,8 @@ function GameInner() {
     for (let i = 0; i < refs.lasers.length; i++) refs.lasers[i]!.active = false;
     for (let i = 0; i < refs.explosions.length; i++) refs.explosions[i]!.active = false;
     clearAllDebris(refs);
+    refs.shake.current = 0;
+    refs.contactCooldown.current = 0;
     refs.robots.forEach((r, i) => {
       r.alive = true;
       r.hp = ROBOT_ARCHETYPES[r.kind].maxHp;
