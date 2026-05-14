@@ -441,17 +441,26 @@ function hasWebGL(): boolean {
 export function Game() {
   const [webglOk] = useState(() => hasWebGL());
   if (!webglOk) {
+    const href = typeof window !== "undefined" ? window.location.href : "#";
     return (
       <div className="absolute inset-0 flex flex-col items-center justify-center bg-black p-8 text-center text-orange-200">
         <h1 className="mb-4 text-3xl font-black tracking-[0.3em] text-orange-400">
           DEEP MINE
         </h1>
         <p className="mb-2 max-w-md text-sm text-orange-200/80">
-          This 3D game needs WebGL, which is disabled in this embedded view.
+          This 3D game needs WebGL, which is disabled in this embedded preview pane.
         </p>
-        <p className="max-w-md text-sm text-orange-200/80">
-          Open the preview in a new browser tab to play.
+        <p className="mb-6 max-w-md text-sm text-orange-200/80">
+          Open it in a real browser tab to play.
         </p>
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded border border-orange-400/70 bg-orange-500/10 px-6 py-3 text-sm font-bold uppercase tracking-[0.3em] text-orange-200 transition hover:bg-orange-500/30 hover:text-orange-50"
+        >
+          OPEN IN NEW TAB
+        </a>
       </div>
     );
   }
