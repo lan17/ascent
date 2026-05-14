@@ -20,6 +20,8 @@ export type Robot = {
   targetCell: [number, number, number] | null;
   lastCell: [number, number, number] | null;
   aiTimer: number;
+  cellOffset: THREE.Vector3;
+  strafeTimer: number;
 };
 
 export type GameState = {

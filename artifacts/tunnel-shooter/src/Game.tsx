@@ -585,6 +585,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       r.bobPhase += d;
       r.fireCooldown -= d;
       r.aiTimer -= d;
+      r.strafeTimer -= d;
 
       const rcx = Math.round(r.pos.x / CELL);
       const rcy = Math.round(r.pos.y / CELL);
@@ -600,11 +601,36 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
         const losDist = losAxisAligned(refs.level, rcx, rcy, rcz, pcx, pcy, pcz);
         let nextStep: [number, number, number] | null = null;
         if (losDist >= 0 && losDist <= 8) {
-          // Walk straight toward the player.
           const dx = pcx === rcx ? 0 : pcx > rcx ? 1 : -1;
           const dy = pcy === rcy ? 0 : pcy > rcy ? 1 : -1;
           const dz = pcz === rcz ? 0 : pcz > rcz ? 1 : -1;
-          if (dx || dy || dz) nextStep = [rcx + dx, rcy + dy, rcz + dz];
+          // Close-range evasion: backstep or sidestep instead of marching in.
+          if (losDist <= 3 && Math.random() < 0.5) {
+            const nbrs = neighborCells(refs.level, rcx, rcy, rcz);
+            // Backstep toward the cell we came from, if it's still a neighbor.
+            if (
+              r.lastCell &&
+              Math.random() < 0.45 &&
+              nbrs.some(
+                (n) =>
+                  n[0] === r.lastCell![0] &&
+                  n[1] === r.lastCell![1] &&
+                  n[2] === r.lastCell![2],
+              )
+            ) {
+              nextStep = r.lastCell;
+            } else {
+              // Sidestep: any neighbor that isn't the direct approach toward player.
+              const sides = nbrs.filter((n) => {
+                const ndx = n[0] - rcx, ndy = n[1] - rcy, ndz = n[2] - rcz;
+                return !(ndx === dx && ndy === dy && ndz === dz);
+              });
+              if (sides.length > 0) {
+                nextStep = sides[Math.floor(Math.random() * sides.length)]!;
+              }
+            }
+          }
+          if (!nextStep && (dx || dy || dz)) nextStep = [rcx + dx, rcy + dy, rcz + dz];
           r.mode = "chase";
         } else {
           // Try short BFS to player.
@@ -636,18 +662,39 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
         r.targetCell = nextStep;
       }
 
-      // Move toward the current target cell center.
+      // Refresh strafe offset so the robot drifts within its target cell instead
+      // of marching dead-center. Bigger jukes when chasing.
+      if (r.strafeTimer <= 0) {
+        if (r.mode === "chase") {
+          r.strafeTimer = 0.35 + Math.random() * 0.45;
+          const mag = 5.5;
+          r.cellOffset.set(
+            (Math.random() * 2 - 1) * mag,
+            (Math.random() * 2 - 1) * mag * 0.6,
+            (Math.random() * 2 - 1) * mag,
+          );
+        } else {
+          r.strafeTimer = 0.8 + Math.random() * 0.6;
+          r.cellOffset.set(0, 0, 0);
+        }
+      }
+
+      // Move toward the current target cell center, biased by the strafe offset.
       if (r.targetCell) {
         _vt.set(
-          r.targetCell[0] * CELL,
-          r.targetCell[1] * CELL,
-          r.targetCell[2] * CELL,
+          r.targetCell[0] * CELL + r.cellOffset.x,
+          r.targetCell[1] * CELL + r.cellOffset.y,
+          r.targetCell[2] * CELL + r.cellOffset.z,
         ).sub(r.pos);
         const stepDist = _vt.length();
         if (stepDist > 0.0001) {
           const speed = r.mode === "chase" ? 9 : 4.5;
           const move = Math.min(stepDist, speed * d);
+          _vPrev.copy(r.pos);
           r.pos.addScaledVector(_vt, move / stepDist);
+          // Respect walls — clamp against the cell we ended up in.
+          const clamped = clampToLevel(refs.level, r.pos, _vPrev);
+          if (!clamped.equals(r.pos)) r.pos.copy(clamped);
         }
       }
 
@@ -783,6 +830,8 @@ function GameInner() {
       targetCell: null,
       lastCell: null,
       aiTimer: Math.random() * 0.4,
+      cellOffset: new THREE.Vector3(),
+      strafeTimer: Math.random() * 0.5,
     }));
     const lasers: Laser[] = [];
     for (let i = 0; i < LASER_POOL_SIZE; i++) {
