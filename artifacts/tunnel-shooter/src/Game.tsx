@@ -411,8 +411,32 @@ function ShipController({ refs }: { refs: SharedRefs }) {
       const vDotN = refs.shipVel.dot(_vDiff);
       if (vDotN < 0) {
         // Closing speed = how fast the ship was moving into the robot.
-        registerContact(refs, -vDotN, "robot");
-        refs.shipVel.addScaledVector(_vDiff, -vDotN);
+        const impact = -vDotN;
+        // Capture cooldown state *before* registerContact arms it, so robot
+        // damage from one hard ram lands exactly once (mirrors ship-damage gating).
+        const damageArmed = refs.contactCooldown.current === 0;
+        registerContact(refs, impact, "robot");
+        refs.shipVel.addScaledVector(_vDiff, impact);
+        if (damageArmed && impact > CONTACT_SPEED_THRESHOLD.robot) {
+          const over = impact - CONTACT_SPEED_THRESHOLD.robot;
+          const robotDmg = Math.min(30, Math.max(3, Math.round(over * CONTACT_DAMAGE_PER_UNIT.robot)));
+          r.hp -= robotDmg;
+          if (r.hp <= 0) {
+            r.alive = false;
+            spawnExplosion(refs, r.pos, "robot");
+            for (let dpi = 0; dpi < DEBRIS_PER_DEATH; dpi++) {
+              spawnDebris(refs, r.pos, r.kind);
+            }
+            const hud = refs.hud.current;
+            hud.score += ROBOT_ARCHETYPES[r.kind].scoreValue;
+            hud.enemiesLeft -= 1;
+            if (!hud.reactorAlive && hud.enemiesLeft <= 0) {
+              hud.status = "won";
+              hud.message = "MINE CLEARED";
+            }
+            refs.setHud({ ...hud });
+          }
+        }
       }
       pushedByRobot = true;
     }
