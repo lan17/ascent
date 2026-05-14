@@ -1,15 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import { CELL, HALF, type Level, type Room } from "./level";
+import { CELL, HALF, type Level, type PickupKind, type Room } from "./level";
 import type { Robot } from "./gameStore";
+import type { PickupRuntime } from "./LevelMesh";
 
 type Props = {
   level: Level;
   shipPos: THREE.Vector3;
   shipQuat: THREE.Quaternion;
   robots: Robot[];
+  pickups: PickupRuntime[];
   onClose: () => void;
+};
+
+// Match the in-world emissive colors used by Pickups so the map dots read
+// as the same item type players see in the cockpit.
+const PICKUP_DOT_COLOR: Record<PickupKind, string> = {
+  shield_cell: "#33aaff",
+  ammo_core: "#ff8a22",
+  score_chip: "#33ff88",
+};
+const PICKUP_LABEL: Record<PickupKind, string> = {
+  shield_cell: "Shield cell",
+  ammo_core: "Ammo core",
+  score_chip: "Score chip",
 };
 
 const KIND_COLOR: Record<Room["kind"], string> = {
@@ -113,12 +128,13 @@ function findCurrentRoom(level: Level, shipPos: THREE.Vector3): Room | null {
 }
 
 function MapScene({
-  level, shipPos, shipQuat, robots, yaw, pitch, zoom, floorY,
+  level, shipPos, shipQuat, robots, pickups, yaw, pitch, zoom, floorY,
 }: {
   level: Level;
   shipPos: THREE.Vector3;
   shipQuat: THREE.Quaternion;
   robots: Robot[];
+  pickups: PickupRuntime[];
   yaw: number;
   pitch: number;
   zoom: number;
@@ -133,6 +149,7 @@ function MapScene({
   const haloRef = useRef<THREE.Mesh>(null);
   const dropRef = useRef<THREE.Mesh>(null);
   const robotGroup = useRef<THREE.Group>(null);
+  const pickupGroup = useRef<THREE.Group>(null);
 
   useFrame((state) => {
     // Orbit camera around level center. dist scales with bounds size + zoom.
@@ -177,6 +194,21 @@ function MapScene({
         if (!c) continue;
         c.position.copy(r.pos);
         c.visible = r.alive;
+      }
+    }
+
+    // Pickup dots — hide collected ones, gently pulse the rest so they
+    // read as live loot even at small zoom.
+    if (pickupGroup.current) {
+      const children = pickupGroup.current.children;
+      const t = state.clock.elapsedTime;
+      const s = 1 + Math.sin(t * 3) * 0.18;
+      for (let i = 0; i < pickups.length; i++) {
+        const p = pickups[i]!;
+        const c = children[i] as THREE.Mesh | undefined;
+        if (!c) continue;
+        c.visible = p.active;
+        if (p.active) c.scale.setScalar(s);
       }
     }
   });
@@ -250,6 +282,26 @@ function MapScene({
         ))}
       </group>
 
+      {/* Uncollected pickup dots — small spheres colored by kind, drawn
+          on top of room volumes so they remain visible inside translucent
+          arenas. */}
+      <group ref={pickupGroup}>
+        {pickups.map((p, i) => (
+          <mesh
+            key={`pickup-${i}`}
+            position={[p.pickup.pos[0], p.pickup.pos[1], p.pickup.pos[2]]}
+            renderOrder={8}
+          >
+            <sphereGeometry args={[0.9, 10, 10]} />
+            <meshBasicMaterial
+              color={PICKUP_DOT_COLOR[p.pickup.kind]}
+              depthTest={false}
+              toneMapped={false}
+            />
+          </mesh>
+        ))}
+      </group>
+
       {/* Vertical drop-line from ship to floor — render before ship marker */}
       <mesh ref={dropRef}>
         <boxGeometry args={[0.25, 1, 0.25]} />
@@ -300,7 +352,7 @@ function ReactorMarker({ pos }: { pos: THREE.Vector3 }) {
   );
 }
 
-export function MapView({ level, shipPos, shipQuat, robots, onClose }: Props) {
+export function MapView({ level, shipPos, shipQuat, robots, pickups, onClose }: Props) {
   // Default to a pleasing isometric-ish angle.
   const [yaw, setYaw] = useState(Math.PI / 4);
   const [pitch, setPitch] = useState(Math.PI / 5);
@@ -399,6 +451,7 @@ export function MapView({ level, shipPos, shipQuat, robots, onClose }: Props) {
             shipPos={shipPos}
             shipQuat={shipQuat}
             robots={robots}
+            pickups={pickups}
             yaw={yaw}
             pitch={pitch}
             zoom={zoom}
@@ -414,6 +467,9 @@ export function MapView({ level, shipPos, shipQuat, robots, onClose }: Props) {
           <Legend swatch="#ff8a3a" label="Hub room" />
           <Legend swatch="#7a55ff" label="Shaft" />
           <Legend swatch="#3a8acc" label="Corridor" />
+          <Legend swatch={PICKUP_DOT_COLOR.shield_cell} label={PICKUP_LABEL.shield_cell} />
+          <Legend swatch={PICKUP_DOT_COLOR.ammo_core} label={PICKUP_LABEL.ammo_core} />
+          <Legend swatch={PICKUP_DOT_COLOR.score_chip} label={PICKUP_LABEL.score_chip} />
         </div>
       </div>
     </div>

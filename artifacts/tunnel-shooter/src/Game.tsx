@@ -1668,6 +1668,7 @@ function GameInner() {
           shipPos={refs.shipPos}
           shipQuat={refs.shipQuat}
           robots={refs.robots}
+          pickups={refs.pickups}
           onClose={() => setMapOpenWithReset(false)}
         />
       )}
@@ -1807,6 +1808,28 @@ function MiniRadar({ refs }: { refs: SharedRefs }) {
           ctx.lineTo(pb[0], pb[1]);
           ctx.stroke();
         }
+      }
+      ctx.globalAlpha = 1;
+
+      // Pickups within a shorter range — small dots colored by kind so
+      // explorers can sense uncollected loot nearby without opening the map.
+      const PICKUP_RADAR_R = WORLD_R * 0.7;
+      for (const pk of refs.pickups) {
+        if (!pk.active) continue;
+        const dx = pk.pickup.pos[0] - sp.x;
+        const dz = pk.pickup.pos[2] - sp.z;
+        if (Math.hypot(dx, dz) > PICKUP_RADAR_R) continue;
+        const dy = pk.pickup.pos[1] - sp.y;
+        if (Math.abs(dy) > yWindow * 1.5) continue;
+        const [px, py] = proj(pk.pickup.pos[0], pk.pickup.pos[2]);
+        const color =
+          pk.pickup.kind === "shield_cell" ? "#33aaff" :
+          pk.pickup.kind === "ammo_core" ? "#ff8a22" : "#33ff88";
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath();
+        ctx.arc(px, py, 2, 0, Math.PI * 2);
+        ctx.fill();
       }
       ctx.globalAlpha = 1;
 
