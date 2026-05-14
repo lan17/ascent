@@ -211,12 +211,11 @@ function ShipController({ refs }: { refs: SharedRefs }) {
     // --- Thrust ---
     const accel = 70;
     _vt.set(0, 0, 0);
-    if (k.has("KeyW")) _vt.addScaledVector(_vz, -1);
-    if (k.has("KeyS")) _vt.addScaledVector(_vz, 1);
+    const shift = k.has("ShiftLeft") || k.has("ShiftRight");
+    if (k.has("KeyW")) _vt.addScaledVector(shift ? _vy : _vz, shift ? 1 : -1);
+    if (k.has("KeyS")) _vt.addScaledVector(shift ? _vy : _vz, shift ? -1 : 1);
     if (k.has("KeyA")) _vt.addScaledVector(_vx, -1);
     if (k.has("KeyD")) _vt.addScaledVector(_vx, 1);
-    if (k.has("ShiftLeft") || k.has("ShiftRight")) _vt.addScaledVector(_vy, 1);
-    if (k.has("ControlLeft") || k.has("ControlRight")) _vt.addScaledVector(_vy, -1);
     if (_vt.lengthSq() > 0) _vt.normalize().multiplyScalar(accel);
     refs.shipVel.addScaledVector(_vt, d);
 
@@ -1488,7 +1487,7 @@ function Controls() {
     <div className="mb-6 grid grid-cols-2 gap-x-8 gap-y-2 rounded border border-orange-400/30 bg-black/40 p-4">
       <Row k="W / S" label="Thrust fwd / back" />
       <Row k="A / D" label="Strafe left / right" />
-      <Row k="Shift / Ctrl" label="Slide up / down" />
+      <Row k="Shift + W / S" label="Strafe up / down" />
       <Row k="Mouse" label="Pitch & yaw (free-aim)" />
       <Row k="Click canvas" label="Lock mouse for FPS look" />
       <Row k="Q / E" label="Roll left / right" />
