@@ -4,6 +4,7 @@ import { EffectComposer, Bloom, Vignette, ChromaticAberration } from "@react-thr
 import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh, Pickups, type PickupRuntime } from "./LevelMesh";
+import { getSlackFaceAtlas, type FaceAtlas } from "./slackFaceAtlas";
 import { MapView } from "./MapView";
 import { bfsNextStep, clampToLevel, destroyProp, generateLevel, isPropDestructible, key, losAxisAligned, neighborCells, resolveShipProps, CELL, HALF, type Level, type PickupKind } from "./level";
 import {
@@ -712,9 +713,46 @@ function aimAt(obj: THREE.Object3D, target: THREE.Vector3) {
   obj.lookAt(target);
 }
 
+// Where to anchor each robot's face plate, in the model's local space (before
+// the archetype scale is applied). Faces are square and front-facing (-Z).
+const ROBOT_FACE_LAYOUT: Record<RobotKind, { pos: [number, number, number]; size: number }> = {
+  scout:  { pos: [0, 0,    -0.62], size: 0.85 },
+  grunt:  { pos: [0, 0.45, -0.42], size: 0.95 },
+  turret: { pos: [0, 0.55, -0.55], size: 0.85 },
+  sniper: { pos: [0, 0.55, -0.45], size: 0.85 },
+};
+
+const FACE_PLATE_GEO = new THREE.PlaneGeometry(1, 1);
+
+function RobotFace({ atlas, seed, kind }: { atlas: FaceAtlas; seed: number; kind: RobotKind }) {
+  // Each robot gets its own texture clone so it can have its own UV offset
+  // into the shared atlas canvas. The underlying GPU texture data is shared.
+  const tex = useMemo(() => {
+    const cellIdx = (((seed * 2654435761) >>> 0) + kind.charCodeAt(0) * 17) % atlas.cells;
+    const { u0, v0, u1, v1 } = atlas.uvFor(cellIdx);
+    const t = atlas.texture.clone();
+    t.needsUpdate = true;
+    t.offset.set(u0, v0);
+    t.repeat.set(u1 - u0, v1 - v0);
+    return t;
+  }, [atlas, seed, kind]);
+  const layout = ROBOT_FACE_LAYOUT[kind];
+  return (
+    <mesh geometry={FACE_PLATE_GEO} position={layout.pos} scale={layout.size}>
+      <meshBasicMaterial map={tex} toneMapped={false} />
+    </mesh>
+  );
+}
+
 function RobotPool({ refs }: { refs: SharedRefs }) {
   const groupRefs = useRef<(THREE.Group | null)[]>([]);
   const animRefs = useRef<AnimRefs[]>([]);
+  const [faceAtlas, setFaceAtlas] = useState<FaceAtlas | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void getSlackFaceAtlas().then((a) => { if (!cancelled) setFaceAtlas(a); });
+    return () => { cancelled = true; };
+  }, []);
 
   // Per-kind material caches so tint matches archetype. Halo is shared per
   // kind; hull and ring are cloned per robot so individual hits can flash
@@ -916,6 +954,7 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
             {r.kind === "grunt" && <GruntModel ar={ar} hull={rm.hull} belt={mats.belt} ringMat={rm.ring} ringColor={a.ringColor} />}
             {r.kind === "turret" && <TurretModel ar={ar} hull={rm.hull} belt={mats.belt} ringMat={rm.ring} ringColor={a.ringColor} />}
             {r.kind === "sniper" && <SniperModel ar={ar} hull={rm.hull} belt={mats.belt} ringColor={a.ringColor} />}
+            {faceAtlas && <RobotFace atlas={faceAtlas} seed={i} kind={r.kind} />}
           </group>
         );
       })}

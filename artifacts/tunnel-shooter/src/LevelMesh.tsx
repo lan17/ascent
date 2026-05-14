@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { CELL, HALF, type Cell, type Level, type Pickup, type PickupKind, type Prop, type PropKind } from "./level";
-import { getSlackFaceAtlas } from "./slackFaceAtlas";
 
 export type PickupRuntime = {
   pickup: Pickup;
@@ -496,59 +495,6 @@ export function LevelMesh({ level }: Props) {
 
   const kinds: Array<"steel" | "tan" | "warning"> = ["steel", "tan", "warning"];
 
-  // If Slack is connected, swap wall textures for an atlas of team avatars and
-  // rewrite each wall quad's UVs to point at a single random atlas cell, so
-  // every tile shows a different face.
-  const wallMatRefs = useRef<Record<string, THREE.MeshStandardMaterial | null>>({});
-  useEffect(() => {
-    let cancelled = false;
-    void getSlackFaceAtlas().then((atlas) => {
-      if (cancelled || !atlas) return;
-      for (const k of kinds) {
-        const pk = built.perKind[k]!;
-        const uvAttr = pk.wallGeo.getAttribute("uv") as THREE.BufferAttribute | undefined;
-        if (!uvAttr) continue;
-        const quadCount = uvAttr.count / 4;
-        const arr = uvAttr.array as Float32Array;
-        for (let q = 0; q < quadCount; q++) {
-          // Deterministic per-quad face pick, mixed with kind so the three
-          // biomes don't all show identical faces in the same tiles.
-          const seed = (q * 2654435761 + k.charCodeAt(0) * 97) >>> 0;
-          const cell = seed % atlas.cells;
-          const { u0, v0, u1, v1 } = atlas.uvFor(cell);
-          const base = q * 4 * 2;
-          // Quad vertex order from the build loop: a, b, c, d.
-          // a (bottom-left), b (bottom-right), c (top-right), d (top-left).
-          arr[base + 0] = u0; arr[base + 1] = v0;
-          arr[base + 2] = u1; arr[base + 3] = v0;
-          arr[base + 4] = u1; arr[base + 5] = v1;
-          arr[base + 6] = u0; arr[base + 7] = v1;
-        }
-        uvAttr.needsUpdate = true;
-        // Also drop the strong vertex tint so faces show their true colors.
-        const colAttr = pk.wallGeo.getAttribute("color") as THREE.BufferAttribute | undefined;
-        if (colAttr) {
-          const ca = colAttr.array as Float32Array;
-          for (let i = 0; i < ca.length; i++) ca[i] = 1.0;
-          colAttr.needsUpdate = true;
-        }
-        const mat = wallMatRefs.current[k];
-        if (mat) {
-          mat.map = atlas.texture;
-          mat.emissiveMap = atlas.texture;
-          mat.normalMap = null;
-          mat.roughnessMap = null;
-          mat.normalScale.set(0, 0);
-          mat.roughness = 0.55;
-          mat.metalness = 0.05;
-          mat.emissiveIntensity = 0.35;
-          mat.needsUpdate = true;
-        }
-      }
-    });
-    return () => { cancelled = true; };
-  }, [built, kinds]);
-
   return (
     <group>
       {kinds.map((k) => {
@@ -557,7 +503,6 @@ export function LevelMesh({ level }: Props) {
           <group key={k}>
             <mesh geometry={pk.wallGeo} matrixAutoUpdate={false}>
               <meshStandardMaterial
-                ref={(m) => { wallMatRefs.current[k] = m; }}
                 vertexColors
                 map={pk.tex.map}
                 normalMap={pk.tex.normalMap}
