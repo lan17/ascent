@@ -4,6 +4,7 @@ import { EffectComposer, Bloom, Vignette, ChromaticAberration } from "@react-thr
 import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 import { LevelMesh } from "./LevelMesh";
+import { MapView } from "./MapView";
 import { clampToLevel, generateLevel, key, CELL, type Level } from "./level";
 import { initialState, type GameState, type Laser, type Robot } from "./gameStore";
 
@@ -461,6 +462,9 @@ function GameInner() {
   const [hudState, setHudState] = useState<GameState>(initialState);
   const hudRef = useRef<GameState>(hudState);
   hudRef.current = hudState;
+  const [mapOpen, setMapOpen] = useState(false);
+  const mapOpenRef = useRef(false);
+  mapOpenRef.current = mapOpen;
 
   const level = useMemo(() => generateLevel(Math.floor(Math.random() * 99999) + 1), []);
 
@@ -495,12 +499,28 @@ function GameInner() {
   // Input handlers
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
-      refs.keys.add(e.code);
-      if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
+      if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab"].includes(e.code)) {
         e.preventDefault();
       }
+      if (e.code === "Tab" && hudRef.current.status === "playing") {
+        setMapOpen((m) => {
+          const next = !m;
+          if (next) {
+            refs.keys.clear();
+            refs.mouse.firing = false;
+            if (document.pointerLockElement) document.exitPointerLock();
+          }
+          return next;
+        });
+        return;
+      }
+      // Don't feed ship-control keys while map is open.
+      if (mapOpenRef.current) return;
+      refs.keys.add(e.code);
     };
-    const ku = (e: KeyboardEvent) => { refs.keys.delete(e.code); };
+    const ku = (e: KeyboardEvent) => {
+      refs.keys.delete(e.code);
+    };
     const md = (e: MouseEvent) => { if (e.button === 0) refs.mouse.firing = true; };
     const mu = (e: MouseEvent) => { if (e.button === 0) refs.mouse.firing = false; };
     const mm = (e: MouseEvent) => {
@@ -606,6 +626,15 @@ function GameInner() {
         state={hudState}
         onStart={startGame}
       />
+      {mapOpen && hudState.status === "playing" && (
+        <MapView
+          level={level}
+          shipPos={refs.shipPos}
+          shipQuat={refs.shipQuat}
+          robots={refs.robots}
+          onClose={() => setMapOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -759,6 +788,7 @@ function Controls() {
       <Row k="Q / E" label="Roll left / right" />
       <Row k="Arrows" label="Pitch & yaw (kbd)" />
       <Row k="Click / Space" label="Fire lasers" />
+      <Row k="Tab" label="Toggle automap" />
       <Row k="Esc" label="Release mouse" />
     </div>
   );
