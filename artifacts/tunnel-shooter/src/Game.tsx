@@ -6,7 +6,14 @@ import * as THREE from "three";
 import { LevelMesh } from "./LevelMesh";
 import { MapView } from "./MapView";
 import { bfsNextStep, clampToLevel, generateLevel, key, losAxisAligned, neighborCells, CELL, type Level } from "./level";
-import { initialState, type GameState, type Laser, type Robot } from "./gameStore";
+import {
+  initialState,
+  ROBOT_ARCHETYPES,
+  type GameState,
+  type Laser,
+  type Robot,
+  type RobotKind,
+} from "./gameStore";
 
 type Explosion = {
   active: boolean;
@@ -123,16 +130,25 @@ function spawnExplosion(refs: SharedRefs, pos: THREE.Vector3, kind: Explosion["k
   }
 }
 
-function spawnLaser(refs: SharedRefs, pos: THREE.Vector3, dir: THREE.Vector3, hostile: boolean) {
+function spawnLaser(
+  refs: SharedRefs,
+  pos: THREE.Vector3,
+  dir: THREE.Vector3,
+  hostile: boolean,
+  speed = hostile ? 60 : 110,
+  damage = hostile ? 12 : 25,
+  life = 2.0,
+) {
   const pool = refs.lasers;
   for (let i = 0; i < pool.length; i++) {
     const L = pool[i]!;
     if (L.active) continue;
     L.active = true;
     L.hostile = hostile;
-    L.life = 2.0;
+    L.life = life;
+    L.damage = damage;
     L.pos.copy(pos);
-    L.vel.copy(dir).normalize().multiplyScalar(hostile ? 60 : 110);
+    L.vel.copy(dir).normalize().multiplyScalar(speed);
     return;
   }
 }
@@ -302,6 +318,29 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
   const ringRefs = useRef<(THREE.Mesh | null)[]>([]);
   const eyeMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
 
+  // Per-kind material caches so tint matches archetype.
+  type KindMatEntry = {
+    hull: THREE.MeshStandardMaterial;
+    ring: THREE.MeshStandardMaterial;
+    halo: THREE.MeshBasicMaterial;
+    eyeRGB: [number, number, number];
+  };
+  const kindMats = useMemo<Record<RobotKind, KindMatEntry>>(() => {
+    const entries = (Object.keys(ROBOT_ARCHETYPES) as RobotKind[]).map((k): [RobotKind, KindMatEntry] => {
+      const a = ROBOT_ARCHETYPES[k];
+      const ring = ROBOT_RING_MAT.clone();
+      ring.color.set(a.ringColor);
+      ring.emissive.set(a.ringColor);
+      const halo = ROBOT_HALO_MAT.clone();
+      halo.color.set(a.haloColor);
+      const hull = ROBOT_HULL_MAT.clone();
+      hull.color.set(a.tint);
+      const c = new THREE.Color(a.ringColor);
+      return [k, { hull, ring, halo, eyeRGB: [c.r, c.g, c.b] }];
+    });
+    return Object.fromEntries(entries) as Record<RobotKind, KindMatEntry>;
+  }, []);
+
   useFrame((state) => {
     if (refs.paused.current) return;
     const t = state.clock.elapsedTime;
@@ -327,32 +366,41 @@ function RobotPool({ refs }: { refs: SharedRefs }) {
       const m = eyeMatRefs.current[i];
       if (m) {
         const pulse = 0.7 + Math.sin(tt * 6) * 0.3;
-        m.color.setRGB(0.2 * pulse, 1.0 * pulse, 0.45 * pulse);
+        const rgb = kindMats[r.kind].eyeRGB;
+        m.color.setRGB(rgb[0] * pulse, rgb[1] * pulse, rgb[2] * pulse);
       }
     }
   });
 
   return (
     <>
-      {refs.robots.map((_, i) => (
-        <group key={i} ref={(el) => { groupRefs.current[i] = el; }}>
-          <mesh geometry={ROBOT_HULL_GEO} material={ROBOT_HULL_MAT} />
-          <mesh geometry={ROBOT_BELT_GEO} material={ROBOT_BELT_MAT} rotation={[Math.PI / 2, 0, 0]} />
-          <mesh
-            geometry={ROBOT_RING_GEO}
-            material={ROBOT_RING_MAT}
-            ref={(el) => { ringRefs.current[i] = el; }}
-          />
-          <mesh geometry={ROBOT_EYE_GEO}>
-            <meshBasicMaterial
-              color="#33ff88"
-              toneMapped={false}
-              ref={(m) => { eyeMatRefs.current[i] = m; }}
+      {refs.robots.map((r, i) => {
+        const a = ROBOT_ARCHETYPES[r.kind];
+        const mats = kindMats[r.kind];
+        return (
+          <group
+            key={i}
+            ref={(el) => { groupRefs.current[i] = el; }}
+            scale={a.scale}
+          >
+            <mesh geometry={ROBOT_HULL_GEO} material={mats.hull} />
+            <mesh geometry={ROBOT_BELT_GEO} material={ROBOT_BELT_MAT} rotation={[Math.PI / 2, 0, 0]} />
+            <mesh
+              geometry={ROBOT_RING_GEO}
+              material={mats.ring}
+              ref={(el) => { ringRefs.current[i] = el; }}
             />
-          </mesh>
-          <mesh geometry={ROBOT_HALO_GEO} material={ROBOT_HALO_MAT} />
-        </group>
-      ))}
+            <mesh geometry={ROBOT_EYE_GEO}>
+              <meshBasicMaterial
+                color={a.ringColor}
+                toneMapped={false}
+                ref={(m) => { eyeMatRefs.current[i] = m; }}
+              />
+            </mesh>
+            <mesh geometry={ROBOT_HALO_GEO} material={mats.halo} />
+          </group>
+        );
+      })}
     </>
   );
 }
@@ -500,7 +548,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       if (L.hostile) {
         const distSq = L.pos.distanceToSquared(refs.shipPos);
         if (distSq < 1.6 * 1.6) {
-          let dmg = 12;
+          let dmg = L.damage;
           const hud = refs.hud.current;
           if (hud.shields > 0) {
             const absorbed = Math.min(hud.shields, dmg);
@@ -532,7 +580,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
               R.alive = false;
               spawnExplosion(refs, R.pos, "robot");
               const hud = refs.hud.current;
-              hud.score += 100;
+              hud.score += ROBOT_ARCHETYPES[R.kind].scoreValue;
               hud.enemiesLeft -= 1;
               if (!hud.reactorAlive && hud.enemiesLeft <= 0) {
                 hud.status = "won";
@@ -593,6 +641,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       r.aiTimer -= d;
       r.strafeTimer -= d;
 
+      const arch = ROBOT_ARCHETYPES[r.kind];
       const rcx = Math.round(r.pos.x / CELL);
       const rcy = Math.round(r.pos.y / CELL);
       const rcz = Math.round(r.pos.z / CELL);
@@ -606,7 +655,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
 
         const losDist = losAxisAligned(refs.level, rcx, rcy, rcz, pcx, pcy, pcz);
         let nextStep: [number, number, number] | null = null;
-        if (losDist >= 0 && losDist <= 8) {
+        if (losDist >= 0 && losDist <= arch.losChaseRange) {
           const dx = pcx === rcx ? 0 : pcx > rcx ? 1 : -1;
           const dy = pcy === rcy ? 0 : pcy > rcy ? 1 : -1;
           const dz = pcz === rcz ? 0 : pcz > rcz ? 1 : -1;
@@ -640,7 +689,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
           r.mode = "chase";
         } else {
           // Try short BFS to player.
-          const step = bfsNextStep(refs.level, rcx, rcy, rcz, pcx, pcy, pcz, 8);
+          const step = bfsNextStep(refs.level, rcx, rcy, rcz, pcx, pcy, pcz, arch.bfsBudget);
           if (step) {
             nextStep = step;
             r.mode = "chase";
@@ -694,7 +743,7 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
         ).sub(r.pos);
         const stepDist = _vt.length();
         if (stepDist > 0.0001) {
-          const speed = r.mode === "chase" ? 9 : 4.5;
+          const speed = r.mode === "chase" ? arch.chaseSpeed : arch.patrolSpeed;
           const move = Math.min(stepDist, speed * d);
           _vPrev.copy(r.pos);
           r.pos.addScaledVector(_vt, move / stepDist);
@@ -708,14 +757,14 @@ function GameLoop({ refs }: { refs: SharedRefs }) {
       if (r.fireCooldown <= 0) {
         _vu.copy(refs.shipPos).sub(r.pos);
         const distToPlayer = _vu.length();
-        if (distToPlayer < 32) {
+        if (distToPlayer < arch.fireRange) {
           const sameCell = rcx === pcx && rcy === pcy && rcz === pcz;
           const losD = sameCell ? 0 : losAxisAligned(refs.level, rcx, rcy, rcz, pcx, pcy, pcz);
           if (sameCell || losD >= 0) {
-            r.fireCooldown = 1.4 + Math.random() * 0.8;
+            r.fireCooldown = arch.fireMin + Math.random() * (arch.fireMax - arch.fireMin);
             _vu.normalize();
             _vt.copy(r.pos).addScaledVector(_vu, 1.5);
-            spawnLaser(refs, _vt, _vu, true);
+            spawnLaser(refs, _vt, _vu, true, arch.laserSpeed, arch.damage);
           } else {
             r.fireCooldown = 0.5;
           }
@@ -818,6 +867,19 @@ export function Game() {
 
 let nextRobotId = 1;
 
+// Deterministic mix of robot archetypes across spawn slots so each level has
+// a varied roster (roughly 40% grunt, 30% scout, 15% turret, 15% sniper).
+const ROBOT_KIND_MIX: RobotKind[] = [
+  "grunt", "scout", "grunt", "turret",
+  "scout", "grunt", "sniper", "scout",
+  "grunt", "turret", "scout", "sniper",
+  "grunt", "scout", "grunt", "turret",
+  "scout", "sniper", "grunt", "scout",
+];
+function pickRobotKind(idx: number): RobotKind {
+  return ROBOT_KIND_MIX[idx % ROBOT_KIND_MIX.length]!;
+}
+
 function GameInner() {
   const [hudState, setHudState] = useState<GameState>(initialState);
   const hudRef = useRef<GameState>(hudState);
@@ -831,20 +893,24 @@ function GameInner() {
   const level = useMemo(() => generateLevel(Math.floor(Math.random() * 99999) + 1), []);
 
   const refs = useMemo<SharedRefs>(() => {
-    const robots: Robot[] = level.enemySpawns.map((p) => ({
-      id: nextRobotId++,
-      pos: p.clone(),
-      hp: 50,
-      fireCooldown: 1 + Math.random() * 2,
-      bobPhase: Math.random() * 6.28,
-      alive: true,
-      mode: "patrol",
-      targetCell: null,
-      lastCell: null,
-      aiTimer: Math.random() * 0.4,
-      cellOffset: new THREE.Vector3(),
-      strafeTimer: Math.random() * 0.5,
-    }));
+    const robots: Robot[] = level.enemySpawns.map((p, idx) => {
+      const kind = pickRobotKind(idx);
+      return {
+        id: nextRobotId++,
+        kind,
+        pos: p.clone(),
+        hp: ROBOT_ARCHETYPES[kind].maxHp,
+        fireCooldown: 1 + Math.random() * 2,
+        bobPhase: Math.random() * 6.28,
+        alive: true,
+        mode: "patrol",
+        targetCell: null,
+        lastCell: null,
+        aiTimer: Math.random() * 0.4,
+        cellOffset: new THREE.Vector3(),
+        strafeTimer: Math.random() * 0.5,
+      };
+    });
     const lasers: Laser[] = [];
     for (let i = 0; i < LASER_POOL_SIZE; i++) {
       lasers.push({
@@ -854,6 +920,7 @@ function GameInner() {
         life: 0,
         hostile: false,
         active: false,
+        damage: 0,
       });
     }
     const explosions: Explosion[] = [];
@@ -992,13 +1059,15 @@ function GameInner() {
     for (let i = 0; i < refs.explosions.length; i++) refs.explosions[i]!.active = false;
     refs.robots.forEach((r, i) => {
       r.alive = true;
-      r.hp = 50;
+      r.hp = ROBOT_ARCHETYPES[r.kind].maxHp;
       r.pos.copy(level.enemySpawns[i]!);
       r.mode = "patrol";
       r.targetCell = null;
       r.lastCell = null;
       r.aiTimer = Math.random() * 0.4;
       r.fireCooldown = 1 + Math.random() * 2;
+      r.cellOffset.set(0, 0, 0);
+      r.strafeTimer = Math.random() * 0.5;
     });
     (level as any).reactorHp = 200;
   };
