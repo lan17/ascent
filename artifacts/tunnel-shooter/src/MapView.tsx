@@ -322,10 +322,21 @@ function MapScene({
             toneMapped={false}
           />
         </mesh>
-        {/* Heading arrow — points along -Z (ship forward) */}
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, -0.5]} renderOrder={11}>
-          <coneGeometry args={[1.6, 4.5, 4]} />
+        {/* Heading arrow — full 3D arrow (shaft + head) pointing along -Z (ship forward) */}
+        {/* Shaft */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, -3.2]} renderOrder={11}>
+          <cylinderGeometry args={[0.45, 0.45, 5.4, 16]} />
           <meshBasicMaterial color="#66ff88" depthTest={false} toneMapped={false} />
+        </mesh>
+        {/* Arrowhead */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, -7.0]} renderOrder={12}>
+          <coneGeometry args={[1.4, 2.6, 20]} />
+          <meshBasicMaterial color="#aaffbb" depthTest={false} toneMapped={false} />
+        </mesh>
+        {/* Subtle dark outline behind the arrowhead so it pops on light backgrounds */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, -7.0]} renderOrder={11}>
+          <coneGeometry args={[1.7, 3.0, 20]} />
+          <meshBasicMaterial color="#0a3a1a" depthTest={false} toneMapped={false} />
         </mesh>
         {/* Body sphere */}
         <mesh renderOrder={11}>
