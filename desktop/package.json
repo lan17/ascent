@@ -1,0 +1,48 @@
+{
+  "name": "deep-mine-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron wrapper that packages the Deep Mine tunnel shooter as a native macOS app.",
+  "main": "main.cjs",
+  "scripts": {
+    "build:web": "node scripts/build-web.mjs",
+    "start": "npm run build:web && electron .",
+    "pack": "npm run build:web && electron-builder --mac --dir",
+    "dist": "npm run build:web && electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.deepmine.app",
+    "productName": "Deep Mine",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "dist-web/**",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.games",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "identity": null,
+      "icon": "build/icon.png"
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    }
+  }
+}
