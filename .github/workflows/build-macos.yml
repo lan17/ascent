@@ -1,0 +1,76 @@
+name: Build macOS app
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      attach_to_release:
+        description: "Also create a draft GitHub Release with the artifacts"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Deep Mine.app
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install workspace deps (for the web build)
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Electron deps
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+
+      - name: Build & package macOS app
+        working-directory: desktop
+        env:
+          # Skip code signing in CI — Apple Developer ID would need to be
+          # injected as secrets; see README for that path.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run dist
+
+      - name: List build output
+        working-directory: desktop
+        run: ls -lah release
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-mine-macos
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.attach_to_release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          files: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
